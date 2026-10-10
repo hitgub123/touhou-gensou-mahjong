@@ -1375,6 +1375,52 @@ export class GameController {
     if (name === '绵月丰姬') { this.log('🌊 海山の絆：自风场风全视为役牌'); return { ...s, players }; }
     if (name === '渡里贝子') { this.log('🏙️ 虚構都市：对手牌局信息虚构化'); return { ...s, players }; }
 
+    // ── qita 其他角色 ──
+    if (name === '稗田阿求') {
+      // 記憶：局终手牌字牌+20能量（HAND_OVER时结算）
+      this.log('📜 記憶：本局结束时手牌字牌+20能量');
+      return { ...s, players };
+    }
+    if (name === '本居小铃') {
+      // 読書：摸到/打出字牌后+20能量
+      p.readingMode = true;
+      this.log('📖 読書：摸到或打出字牌后+20能量');
+      return { ...s, players };
+    }
+    if (name === '绵月依姬') {
+      // 神降ろし：每局限一次，和牌时+1翻（finishWin中结算）
+      if (p.abilityUsedThisHand > 0) { this.log('⛩️ 本局已发动过神降ろし'); return null; }
+      this.log('⛩️ 神降ろし：本局和牌时所有役+1翻');
+      return { ...s, players };
+    }
+    if (name === '宇佐见莲子') {
+      // 境界視：摸牌大概率中张（drawTile中结算）
+      p.drawBiasMiddle = true;
+      this.log('👁️ 境界視：本局摸牌大概率摸中张');
+      return { ...s, players };
+    }
+    if (name === '玛艾露贝莉·赫恩') {
+      // 夢幻：摸牌大概率幺九（drawTile中结算）
+      p.drawBiasTerminal = true;
+      this.log('🌙 夢幻：本局摸牌大概率摸幺九牌');
+      return { ...s, players };
+    }
+    if (name === '姬海棠羽立') {
+      // 念写：局终对手手牌有字牌付4000（HAND_OVER时结算）
+      this.log('📸 念写：局终时对手手牌有字牌需付4000分');
+      return { ...s, players };
+    }
+    if (name === '桑尼·米尔克') {
+      // 光の屈折：下局开始对手付饼子税（createNextHand中结算）
+      this.log('☀️ 光の屈折：下局其他玩家支付饼子税(1000×饼子数)');
+      return { ...s, players, sunnyTaxPending: true };
+    }
+    if (name === '露娜·切尔德') {
+      // 沈黙：流局时每人付4000（executeDraw中结算）
+      this.log('🔇 沈黙：本局流局时其他玩家每人付4000分');
+      return { ...s, players };
+    }
+
     // 未匹配
     return null;
   }

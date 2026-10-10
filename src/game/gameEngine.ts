@@ -172,6 +172,24 @@ export function createInitialState(characters?: { name: string }[], dealerWind?:
       sniperReserve: null,
       totalAbilityUses: 0,
       seeAllHands: false,
+      yuugiSanshoku: false,
+      // ── 桑尼光屈折：其他玩家付饼子税 ──
+      ...(prevState.sunnyTaxPending ? (() => {
+        const sunny = players.find(p => p.name === '桑尼·米尔克');
+        if (sunny) {
+          for (const opp of players) {
+            if (opp.wind === sunny.wind) continue;
+            const pinCount = opp.hand.filter(t => t.suit === 'p').length;
+            if (pinCount > 0) {
+              const tax = Math.min(pinCount * 1000, opp.score);
+              opp.score -= tax;
+              sunny.score += tax;
+              debugLog('SUNNY_DBG', { from: opp.name, to: sunny.name, pinCount, tax });
+            }
+          }
+        }
+        return {};
+      })() : {}),
     };
   }
 
@@ -239,25 +257,53 @@ export function drawTile(state: GameState): GameState {
   if (cp.name === '八坂神奈子') biasSuit = 's';
   else if (cp.name === '洩矢诹访子') biasSuit = 'p';
   if (biasSuit && cp.abilityUseCount > 0 && wall.length > 0) {
-    const level = Math.min(cp.abilityUseCount, 3);
-    const chance = 0.3 + level * 0.1; // 40%/50%/60%
-    if (Math.random() < chance) {
-      // 从牌山随机位置找指定花色
-      const indices = wall.map((t, i) => ({ t, i })).filter(x => x.t.suit === biasSuit);
-      if (indices.length > 0) {
-        const pick = indices[Math.floor(Math.random() * indices.length)];
-        // 交换：把牌山顶的牌放到找到的位置，摸找到的牌
-        drawnTile = pick.t;
-        wall[pick.i] = wall[0];
-        wall.shift();
-      }
+  const level = Math.min(cp.abilityUseCount, 3);
+  const chance = 0.3 + level * 0.1; // 40%/50%/60%
+  if (Math.random() < chance) {
+    // 从牌山随机位置找指定花色
+    const indices = wall.map((t, i) => ({ t, i })).filter(x => x.t.suit === biasSuit);
+    if (indices.length > 0) {
+      const pick = indices[Math.floor(Math.random() * indices.length)];
+      // 交换：把牌山顶的牌放到找到的位置，摸找到的牌
+      drawnTile = pick.t;
+      wall[pick.i] = wall[0];
+      wall.shift();
     }
+  }
+  }
+
+  // ── 境界視：摸牌大概率中张(2-8) ──
+  if (cp.drawBiasMiddle && wall.length > 0 && Math.random() < 0.5) {
+  const midIndices = wall.map((t, i) => ({ t, i })).filter(x => x.t.suit !== 'z' && x.t.value >= 2 && x.t.value <= 8);
+  if (midIndices.length > 0) {
+    const pick = midIndices[Math.floor(Math.random() * midIndices.length)];
+    drawnTile = pick.t;
+    wall[pick.i] = wall[0];
+    wall.shift();
+  }
+  }
+
+  // ── 夢幻：摸牌大概率幺九 ──
+  if (cp.drawBiasTerminal && wall.length > 0 && Math.random() < 0.5) {
+  const termIndices = wall.map((t, i) => ({ t, i })).filter(x => t.suit === 'z' || t.value === 1 || t.value === 9);
+  if (termIndices.length > 0) {
+    const pick = termIndices[Math.floor(Math.random() * termIndices.length)];
+    drawnTile = pick.t;
+    wall[pick.i] = wall[0];
+    wall.shift();
+  }
   }
 
   const isLastDraw = wall.length === 0;
   const players = state.players.map(p => ({ ...p, hand: [...p.hand] }));
   const player = players[state.currentPlayer];
   player.hand = [...player.hand, drawnTile];
+
+  // ── 本居小铃読書：摸到字牌+20能量 ──
+  if (player.readingMode && drawnTile.suit === 'z') {
+    player.energy = Math.min(player.energyMax, player.energy + 20);
+    debugLog('READING_DBG', { player: player.name, tile: `${drawnTile.value}${drawnTile.suit}`, energy: player.energy });
+  }
 
   const actions = getDrawActions(player, state, state.currentPlayer, drawnTile);
   const hasActions = actions.canRiichi || actions.canTsumo || actions.canAnkan || actions.canKakan || actions.canNineOrphans;
@@ -405,6 +451,11 @@ export function discardTile(state: GameState, tileId: number): GameState {
   // 能量槽：弃牌 +energyPerDiscard（嫉妬封锁除外）
   if (!player.energyGainBlocked) {
     player.energy = Math.min(player.energyMax, player.energy + player.energyPerDiscard);
+  }
+
+  // ── 本居小铃読書：打出字牌+20能量 ──
+  if (player.readingMode && discarded.suit === 'z') {
+    player.energy = Math.min(player.energyMax, player.energy + 20);
   }
 
   // 食替检查：不能打出鸣牌所关联的牌
@@ -834,6 +885,12 @@ function finishWin(state: GameState, playerWind: Wind, isTsumo: boolean, winning
     }
   }
 
+  // ── 绵月依姬神降ろし：和牌时所有役+1翻（每局限一次）──
+  if (player.name === '绵月依姬' && player.abilityUsedThisHand > 0) {
+    totalHan += 1;
+    debugLog('YORIHIME_DBG', { player: player.name, hanBefore: totalHan - 1, hanAfter: totalHan });
+  }
+
   const isDealerWin = player.isDealer;
   const score = calculateScore(
     evalResult.fu, totalHan, isDealerWin, isTsumo,
@@ -961,6 +1018,35 @@ function finishWin(state: GameState, playerWind: Wind, isTsumo: boolean, winning
     }
   }
 
+  // ── 稗田阿求記憶：手牌每张字牌+20能量 ──
+  for (const p of players) {
+    if (p.name === '稗田阿求') {
+      const zCount = p.hand.filter(t => t.suit === 'z').length;
+      if (zCount > 0 && !p.energyGainBlocked) {
+        const bonus = zCount * 20;
+        p.energy = Math.min(p.energyMax, p.energy + bonus);
+        debugLog('AKYUU_DBG', { player: p.name, zCount, bonus, energyAfter: p.energy });
+      }
+    }
+  }
+
+  // ── 姬海棠羽立念写：对手手牌有字牌需付4000分 ──
+  for (const hatate of players) {
+    if (hatate.name === '姬海棠羽立') {
+      for (const opp of players) {
+        if (opp.wind === hatate.wind) continue;
+        const hasZ = opp.hand.some(t => t.suit === 'z');
+        if (hasZ) {
+          const pay = Math.min(4000, opp.score);
+          opp.score -= pay;
+          hatate.score += pay;
+          debugLog('HATATE_DBG', { from: opp.name, to: hatate.name, amount: pay });
+        }
+      }
+      break; // 只有一个姬海棠
+    }
+  }
+
   return {
     ...state, players, result, phase: GamePhase.HAND_OVER,
     actionsAvailable: WINDS.map(() => emptyActions()),  // 清空所有动作，防止 effect 二次触发
@@ -1022,6 +1108,44 @@ export function executeDraw(state: GameState): GameState {
   for (const pay of payments) {
     players[pay.from].score -= pay.amount;
     players[pay.to].score += pay.amount;
+  }
+
+  // ── 稗田阿求記憶：手牌每张字牌+20能量 ──
+  for (const p of players) {
+    if (p.name === '稗田阿求') {
+      const zCount = p.hand.filter(t => t.suit === 'z').length;
+      if (zCount > 0 && !p.energyGainBlocked) {
+        p.energy = Math.min(p.energyMax, p.energy + zCount * 20);
+      }
+    }
+  }
+
+  // ── 姬海棠羽立念写：对手手牌有字牌需付4000分 ──
+  for (const hatate of players) {
+    if (hatate.name === '姬海棠羽立') {
+      for (const opp of players) {
+        if (opp.wind === hatate.wind) continue;
+        if (opp.hand.some(t => t.suit === 'z')) {
+          const pay = Math.min(4000, opp.score);
+          opp.score -= pay;
+          hatate.score += pay;
+        }
+      }
+      break;
+    }
+  }
+
+  // ── 露娜·切尔德沈黙：流局时其他玩家每人付4000分 ──
+  for (const luna of players) {
+    if (luna.name === '露娜·切尔德') {
+      for (const opp of players) {
+        if (opp.wind === luna.wind) continue;
+        const pay = Math.min(4000, opp.score);
+        opp.score -= pay;
+        luna.score += pay;
+      }
+      break;
+    }
   }
 
   const result: HandResult = {
@@ -1146,47 +1270,53 @@ export function createNextHand(prevState: GameState): GameState {
   const doSanshoku = prevState.yuugiSanshoku === true;
   const yuugiWind = doSanshoku ? WINDS.find(w => prevState.players[w].name === '星熊勇仪') : undefined;
 
-  const players: Player[] = WINDS.map((wind) => {
+  const players: Player[] = [];
+  for (const wind of WINDS) {
     const sm = satoriMap[wind];
-    return {
-    name: prevState.players[wind].name,
-    wind,
-    hand: [],
-    melds: [],
-    discards: [],
-    discardsSize: 0,
-    isRiichi: false,
-    isDoubleRiichi: false,
-    riichiDiscardIndex: -1,
-    riichiTurnStart: -1,
-    score: prevState.players[wind].score,
-    isDealer: wind === newDealer,
-    isHuman: wind === Wind.EAST,
-    tenpai: false,
-    hasCalled: false,
-    restrictedDiscardKeys: [],
-    energy: prevState.players[wind].energy,  // 继承能量槽
-    energyMax: prevState.players[wind].energyMax,
-    energyPerDiscard: prevState.players[wind].energyPerDiscard,
-    energyPerDraw: prevState.players[wind].energyPerDraw,
-    energyPerMeld: prevState.players[wind].energyPerMeld,
-    energyPerRiichi: prevState.players[wind].energyPerRiichi,
-    energyPerWin: prevState.players[wind].energyPerWin,
-    abilityUseCount: prevState.players[wind].abilityUseCount,
-    swapEnergyCost: prevState.players[wind].swapEnergyCost,
-    frozenByCirno: false,
-    skipNextDraw: false,
-    hideDiscards: 0,
-    seeNextDraw: false,
-    abilityUsedThisHand: 0,
-    dollCount: 0,
-    deathDoraIds: [],
-    jokerSuit: null,
-    abilityBlocked: false,
-    energyGainBlocked: false,
-    satoriCopyTarget: sm.target,
-    satoriCopyUsed: sm.used,
-  });
+    const p: Player = {
+      name: prevState.players[wind].name,
+      wind,
+      hand: [],
+      melds: [],
+      discards: [],
+      discardsSize: 0,
+      isRiichi: false,
+      isDoubleRiichi: false,
+      riichiDiscardIndex: -1,
+      riichiTurnStart: -1,
+      score: prevState.players[wind].score,
+      isDealer: wind === newDealer,
+      isHuman: wind === Wind.EAST,
+      tenpai: false,
+      hasCalled: false,
+      restrictedDiscardKeys: [],
+      energy: prevState.players[wind].energy,
+      energyMax: prevState.players[wind].energyMax,
+      energyPerDiscard: prevState.players[wind].energyPerDiscard,
+      energyPerDraw: prevState.players[wind].energyPerDraw,
+      energyPerMeld: prevState.players[wind].energyPerMeld,
+      energyPerRiichi: prevState.players[wind].energyPerRiichi,
+      energyPerWin: prevState.players[wind].energyPerWin,
+      abilityUseCount: prevState.players[wind].abilityUseCount,
+      swapEnergyCost: prevState.players[wind].swapEnergyCost,
+      frozenByCirno: false,
+      skipNextDraw: false,
+      hideDiscards: 0,
+      seeNextDraw: false,
+      abilityUsedThisHand: 0,
+      dollCount: 0,
+      deathDoraIds: [],
+      jokerSuit: null,
+      abilityBlocked: false,
+      energyGainBlocked: false,
+      satoriCopyTarget: sm.target,
+      satoriCopyUsed: sm.used,
+      readingMode: false,
+      drawBiasMiddle: false,
+      drawBiasTerminal: false,
+    };
+    players.push(p);
+  }
 
   // 配牌：先处理能力需求，再随机分配剩余牌
   const playerNames2 = players.map(p => p.name);
@@ -1240,6 +1370,25 @@ export function createNextHand(prevState: GameState): GameState {
       }
     }
 
+    // ── 星熊勇仪三色同顺 ──
+    if (doSanshoku && yuugiWind !== undefined) {
+      const base = Math.floor(Math.random() * 7) + 1; // 1-7
+      const suits: Array<'m'|'p'|'s'> = ['m', 'p', 's'];
+      const sanshokuTiles: Tile[] = [];
+      for (const suit of suits) {
+        for (let v = base; v < base + 3; v++) {
+          const existing = wallPool.findIndex(t => t.suit === suit && t.value === v);
+          if (existing >= 0) {
+            sanshokuTiles.push(wallPool[existing]);
+            wallPool.splice(existing, 1);
+          } else {
+            sanshokuTiles.push({ id: Date.now() + Math.random() * 10000, suit, value: v });
+          }
+        }
+      }
+      reserved.push({ wind: yuugiWind, tiles: sanshokuTiles });
+    }
+
     const remaining2 = shuffleArray(wallPool);
     for (const r of reserved) {
       if (r.wind < 0) {
@@ -1290,6 +1439,24 @@ export function createNextHand(prevState: GameState): GameState {
       sniperReserve: null,
       totalAbilityUses: 0,
       seeAllHands: false,
+      yuugiSanshoku: false,
+      // ── 桑尼光屈折：其他玩家付饼子税 ──
+      ...(prevState.sunnyTaxPending ? (() => {
+        const sunny = players.find(p => p.name === '桑尼·米尔克');
+        if (sunny) {
+          for (const opp of players) {
+            if (opp.wind === sunny.wind) continue;
+            const pinCount = opp.hand.filter(t => t.suit === 'p').length;
+            if (pinCount > 0) {
+              const tax = Math.min(pinCount * 1000, opp.score);
+              opp.score -= tax;
+              sunny.score += tax;
+              debugLog('SUNNY_DBG', { from: opp.name, to: sunny.name, pinCount, tax });
+            }
+          }
+        }
+        return {};
+      })() : {}),
     };
   }
 

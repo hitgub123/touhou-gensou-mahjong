@@ -90,13 +90,13 @@ const REGISTRY: Record<string, AbilityDef> = {
   '洩矢诹访子':        { cost:100, type:'modifier', implemented:true, description:'大地 — 饼子摸牌概率+40/50/60%' },
 
   // ── th11 地灵殿 ──
-  '黑谷山女':          { cost:100, type:'instant', implemented:true, description:'疫病 — 指定对手下张摸牌自摸切' },
-  '水桥帕露希':        { cost:100, type:'instant', implemented:true, description:'嫉妬 — 对手和牌得分-30%' },
-  '星熊勇仪':          { cost:100, type:'instant', implemented:true, description:'怪力 — 本巡无视食替限制弃牌' },
-  '古明地觉':          { cost:100, type:'instant', implemented:true, description:'読心 — 查看一名对手全部手牌' },
-  '火焰猫燐':          { cost:100, type:'instant', implemented:true, description:'死体移送 — 弃牌区一张牌移回手牌' },
-  '灵乌路空':          { cost:100, type:'instant', implemented:true, description:'核融合 — 手牌本巡视为同花色' },
-  '古明地恋':          { cost:100, type:'instant', implemented:true, description:'無意識 — 自己弃牌对对手不可见' },
+  '黑谷山女':          { cost:100, type:'instant', implemented:true, description:'疫病 — 指定对手本局无法使用技能' },
+  '水桥帕露希':        { cost:100, type:'instant', implemented:true, description:'嫉妬 — 指定对手本局无法增加能量' },
+  '星熊勇仪':          { cost:100, type:'instant', implemented:true, description:'怪力 — 下一局配牌有三色同顺' },
+  '古明地觉':          { cost:100, type:'instant', implemented:true, description:'読心 — 下一局获得指定对手技能(不剥夺)' },
+  '火焰猫燐':          { cost:100, type:'instant', implemented:true, description:'死体移送 — 选3张手牌交给非立直对手，随机获3张' },
+  '灵乌路空':          { cost:100, type:'instant', implemented:true, description:'核融合 — 每局限一次手牌换宝牌指示牌' },
+  '古明地恋':          { cost:100, type:'instant', implemented:true, description:'無意識 — 其他角色发动技能后能量归零' },
 
   // ── th12 星莲船 ──
   '娜兹玲':            { cost:100, type:'instant', implemented:true, description:'探宝 — 查看牌山顶3张' },
@@ -179,7 +179,15 @@ const REGISTRY: Record<string, AbilityDef> = {
   '渡里贝子':          { cost:100, type:'instant', implemented:true, description:'虚構都市 — 对手牌局信息虚构化' },
 
   // ── 其他 ──
-  '斯塔·萨菲雅':      { cost:100, type:'dealing',  implemented:true, description:'星の輝き — 配牌即听牌' },
+  '稗田阿求':           { cost:100, type:'instant',  implemented:true, description:'記憶 — 本局结束时手牌字牌+20能量' },
+  '本居小铃':           { cost:100, type:'instant',  implemented:true, description:'読書 — 摸到或打出字牌后+20能量' },
+  '绵月依姬':           { cost:100, type:'instant',  implemented:true, description:'神降ろし — 每局限一次，和牌时所有役+1翻' },
+  '宇佐见莲子':         { cost:100, type:'instant',  implemented:true, description:'境界視 — 本局摸牌大概率摸中张' },
+  '玛艾露贝莉·赫恩':   { cost:100, type:'instant',  implemented:true, description:'夢幻 — 本局摸牌大概率摸幺九牌' },
+  '姬海棠羽立':         { cost:100, type:'instant',  implemented:true, description:'念写 — 局终时对手手牌有字牌需付4000分' },
+  '桑尼·米尔克':        { cost:100, type:'instant',  implemented:true, description:'光の屈折 — 下局开始其他玩家付饼子税(1000×饼子数)' },
+  '露娜·切尔德':        { cost:100, type:'instant',  implemented:true, description:'沈黙 — 本局流局时其他玩家每人付4000分' },
+  '斯塔·萨菲雅':       { cost:100, type:'dealing',  implemented:true, description:'星の輝き — 配牌即听牌' },
 };
 
 // ═══════════════════════════════════════════
@@ -242,7 +250,7 @@ export function getHandRequirement(name: string, useCount: number): HandRequirem
 
   // 斯塔·萨菲雅：配牌即听牌
   if (name === '斯塔·萨菲雅' && useCount > 0) {
-    return { wind: -1, useCount, tiles: [], tenpai: true };
+    return { wind: 0, useCount, tiles: [], tenpai: true };
   }
 
   // 风见幽香：配牌随机筒子暗杠

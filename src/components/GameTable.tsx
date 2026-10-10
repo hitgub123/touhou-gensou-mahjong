@@ -445,7 +445,7 @@ const DiscardArea: React.FC<{ state: GameState }> = ({ state }) => {
       ))}
       <div className="wall-info">
         <span className="wall-count">残 {state.wall.length} 枚</span>
-        {player.seeNextDraw && state.wall.length > 0 && (
+        {state.players[humanWind].seeNextDraw && state.wall.length > 0 && (
           <span className="next-draw" style={{ marginLeft: 12, color: '#ffd700' }}>
             下一张: <TileComponent tile={state.wall[0]} small />
           </span>

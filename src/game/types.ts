@@ -107,6 +107,12 @@ export interface Player {
   satoriCopyTarget: Wind | null;
   /** 読心：复制是否已生效过一局 */
   satoriCopyUsed: boolean;
+  /** 読書：下局摸/打字牌+20能量（本居小铃） */
+  readingMode: boolean;
+  /** 境界視：摸牌大概率中张（宇佐见莲子） */
+  drawBiasMiddle: boolean;
+  /** 夢幻：摸牌大概率幺九（玛艾露贝莉） */
+  drawBiasTerminal: boolean;
 }
 
 /** 能量槽默认配置 */
@@ -240,6 +246,8 @@ export interface GameState {
   _sakuyaExtraTurn?: boolean;
   /** 星熊勇仪怪力：下局配牌有三色同顺 */
   yuugiSanshoku?: boolean;
+  /** 桑尼光屈折：下局配牌后对手付饼子税 */
+  sunnyTaxPending?: boolean;
 }
 
 /** 角色定义 */
