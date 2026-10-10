@@ -8,6 +8,7 @@ import ActionPanel from './ActionPanel';
 import GameOverModal from './GameOverModal';
 import WallPulldown from './WallPulldown';
 import type { DifficultyLevel } from '../game/difficulty';
+import { getCharAvatar } from '../game/charAvatar';
 
 interface GameTableProps {
   state: GameState;
@@ -32,14 +33,18 @@ interface GameTableProps {
   onToggleNoCall: () => void;
   onToggleAutoWin: () => void;
   gameLength: number;
-  onGameLengthChange: (v: number) => void;
+  onGameLengthChange: (n: number) => void;
+  autoPlay: boolean;
+  onToggleAutoPlay: () => void;
+  activateAbility: () => boolean;
 }
 
 function fmtScore(score: number): string {
   return score < 0 ? `−${Math.abs(score).toLocaleString()}` : score.toLocaleString();
 }
 
-const GameTable: React.FC<GameTableProps> = ({ state, selectedTileId, onTileClick, onTileDoubleClick, onTileContextMenu, onAction, onNewGame, onNextHand, swapMode, onSwapTile, riichiMode, riichiValidTileIds, onCancelRiichi, difficulty, onDifficultyChange, autoSelfDiscard, noCall, autoWin, onToggleSelfDiscard, onToggleNoCall, onToggleAutoWin, gameLength, onGameLengthChange }) => {
+const GameTable: React.FC<GameTableProps> = ({ state, selectedTileId, onTileClick, onTileDoubleClick, onTileContextMenu, onAction, onNewGame, onNextHand, swapMode, onSwapTile, riichiMode, riichiValidTileIds, onCancelRiichi, difficulty, onDifficultyChange, autoSelfDiscard, noCall, autoWin, onToggleSelfDiscard, onToggleNoCall, onToggleAutoWin, gameLength, onGameLengthChange, autoPlay, onToggleAutoPlay, activateAbility }) => {
+  const [revealHands, setRevealHands] = React.useState(true);
   const riichiWaitFloat = React.useMemo(() => {
     if (!riichiMode || selectedTileId === null) return null;
     const info = riichiValidTileIds.get(selectedTileId);
@@ -56,6 +61,11 @@ const GameTable: React.FC<GameTableProps> = ({ state, selectedTileId, onTileClic
         </div>
         <div className="header-actions">
           <WallPulldown state={state} swapMode={swapMode} onSelectTile={onSwapTile} />
+          <button className={`btn-reveal ${revealHands ? 'active' : ''}`}
+            onClick={() => setRevealHands(v => !v)}
+            title="查看所有玩家手牌">
+            {revealHands ? '隐藏手牌' : '显示手牌'}
+          </button>
           <select className="game-length-select" value={gameLength} onChange={e => onGameLengthChange(Number(e.target.value))} disabled={!canChangeLength} title={canChangeLength ? '' : '游戏中不可修改'}>
             <option value={1}>东风</option>
             <option value={2}>东南</option>
@@ -82,16 +92,18 @@ const GameTable: React.FC<GameTableProps> = ({ state, selectedTileId, onTileClic
       {swapMode && <div className="swap-banner">🔄 点击牌山中要交换的牌，或右键取消</div>}
 
       <div className="table-area">
-        <OpponentSection state={state} wind={Wind.WEST} />
-        <OpponentSection state={state} wind={Wind.NORTH} vertical />
+        <OpponentSection state={state} wind={Wind.WEST} revealHands={revealHands} />
+        <OpponentSection state={state} wind={Wind.NORTH} vertical revealHands={revealHands} />
         <DiscardArea state={state} />
-        <OpponentSection state={state} wind={Wind.SOUTH} vertical />
+        <OpponentSection state={state} wind={Wind.SOUTH} vertical revealHands={revealHands} />
         <PlayerSection state={state} playerWind={Wind.EAST} selectedTileId={selectedTileId}
           onTileClick={onTileClick} onTileDoubleClick={onTileDoubleClick}
           onTileContextMenu={onTileContextMenu}
           riichiMode={riichiMode} riichiValidTileIds={riichiValidTileIds}
           autoSelfDiscard={autoSelfDiscard} noCall={noCall} autoWin={autoWin}
-          onToggleSelfDiscard={onToggleSelfDiscard} onToggleNoCall={onToggleNoCall} onToggleAutoWin={onToggleAutoWin} />
+          onToggleSelfDiscard={onToggleSelfDiscard} onToggleNoCall={onToggleNoCall} onToggleAutoWin={onToggleAutoWin}
+          autoPlay={autoPlay} onToggleAutoPlay={onToggleAutoPlay}
+          activateAbility={activateAbility} />
       </div>
 
       <ActionPanel state={state} onAction={onAction} riichiMode={riichiMode} onCancelRiichi={onCancelRiichi} />
@@ -110,9 +122,10 @@ interface OpponentProps {
   state: GameState;
   wind: Wind;
   vertical?: boolean;
+  revealHands?: boolean;
 }
 
-const OpponentSection: React.FC<OpponentProps> = ({ state, wind, vertical }) => {
+const OpponentSection: React.FC<OpponentProps> = ({ state, wind, vertical, revealHands }) => {
   const player = state.players[wind];
   const ch = TOUHOU_CHARACTERS[wind];
   const isActive = state.currentPlayer === wind && state.phase !== GamePhase.HAND_OVER;
@@ -122,20 +135,33 @@ const OpponentSection: React.FC<OpponentProps> = ({ state, wind, vertical }) => 
   return (
     <div className={`opponent-area ${vertical ? 'opponent-vertical' : 'opponent-horizontal'} opponent-${['east','south','west','north'][wind]} ${isActive ? 'player-active' : ''}`}>`
       <div className="player-info" style={{ borderColor: ch.color }}>
-        <span className="player-name" style={{ color: ch.color }}>{player.name}</span>
+        <div className="player-name-row">
+          {(() => { const av = getCharAvatar(player.name); return av ? <img src={av} className="player-avatar" width={36} height={36} alt="" /> : null; })()}
+          <div className="player-name-col">
+            <span className="player-name" style={{ color: ch.color }}>{player.name}</span>
+          </div>
+        </div>
         <div className="player-info-row">
           <span className="player-score" style={{ color: ch.colorLight }}>{fmtScore(player.score)}</span>
           <span className="player-wind">{['東','南','西','北'][displayWind]}</span>
           {player.isRiichi && <span className="riichi-badge">{player.isDoubleRiichi ? '两立直' : '立直'}</span>}
           {player.isDealer && <span className="dealer-badge">庄</span>}
         </div>
+        <div className="energy-bar-wrap">
+          <span className="energy-text" style={{ color: ch.colorLight }}>⚡{player.energy}/{player.energyMax}</span>
+          {player.abilityUseCount > 0 && (
+            <span className="ability-count" style={{ color: ch.color, fontSize: 10, marginLeft: 3 }}>
+              ×{player.abilityUseCount}
+            </span>
+          )}
+        </div>
       </div>
 
-      <div className={`hand-tiles ${vertical ? 'hand-vertical' : ''}`}>
-        {player.hand.map(t => (
-          <TileComponent key={t.id} tile={t} faceDown small={vertical} />
-        ))}
-      </div>
+        <div className={`hand-tiles ${vertical ? 'hand-vertical' : ''}`}>
+          {player.hand.map(t => (
+            <TileComponent key={t.id} tile={t} faceDown={!revealHands && !state.seeAllHands} small={vertical} />
+          ))}
+        </div>
 
       {player.melds.length > 0 && (
         <div className="meld-area">
@@ -175,13 +201,17 @@ interface PlayerSectionProps {
   onToggleSelfDiscard: () => void;
   onToggleNoCall: () => void;
   onToggleAutoWin: () => void;
+  autoPlay: boolean;
+  onToggleAutoPlay: () => void;
+  activateAbility: () => boolean;
 }
 
-const PlayerSection: React.FC<PlayerSectionProps> = ({ state, playerWind, selectedTileId, onTileClick, onTileDoubleClick, onTileContextMenu, riichiMode, riichiValidTileIds, autoSelfDiscard, noCall, autoWin, onToggleSelfDiscard, onToggleNoCall, onToggleAutoWin }) => {
+const PlayerSection: React.FC<PlayerSectionProps> = ({ state, playerWind, selectedTileId, onTileClick, onTileDoubleClick, onTileContextMenu, riichiMode, riichiValidTileIds, autoSelfDiscard, noCall, autoWin, onToggleSelfDiscard, onToggleNoCall, onToggleAutoWin, autoPlay, onToggleAutoPlay, activateAbility }) => {
   const player = state.players[playerWind];
   const ch = TOUHOU_CHARACTERS[playerWind];
   const isActive = state.currentPlayer === playerWind && state.phase !== GamePhase.HAND_OVER;
   const canAct = state.phase === GamePhase.DISCARDING || state.phase === GamePhase.ACTION_PROMPT;
+  const [flashKey, setFlashKey] = React.useState(0);
 
   const riichiWaitInfo = React.useMemo(() => {
     if (!riichiMode || selectedTileId === null) return null;
@@ -196,16 +226,34 @@ const PlayerSection: React.FC<PlayerSectionProps> = ({ state, playerWind, select
   const displayWind = (playerWind - dealerIdx + 4) % 4;
 
   return (
-    <div className={`player-section ${isActive ? 'player-active' : ''}`}>
+    <div className={`player-section ${isActive ? 'player-active' : ''} ${flashKey > 0 ? 'ability-flash' : ''}`} key={flashKey}>
       <div className="player-bar">
         <div className="player-info" style={{ borderColor: ch.color }}>
-          <span className="player-name" style={{ color: ch.color }}>{player.name}</span>
-          <span className="player-title">{ch.title}</span>
+          <div className="player-name-row">
+            {(() => { const av = getCharAvatar(player.name); return av ? <img src={av} className="player-avatar" width={40} height={40} alt="" /> : null; })()}
+            <div className="player-name-col">
+              <span className="player-name" style={{ color: ch.color }}>{player.name}</span>
+              <span className="player-title">{ch.title}</span>
+            </div>
+          </div>
           <div className="player-info-row">
             <span className="player-score" style={{ color: ch.colorLight }}>{fmtScore(player.score)}</span>
             <span className="player-wind">{['東','南','西','北'][displayWind]}</span>
             {player.isRiichi && <span className="riichi-badge">{player.isDoubleRiichi ? '两立直' : '立直'}</span>}
             {player.isDealer && <span className="dealer-badge">庄</span>}
+          </div>
+          <div className="energy-bar-wrap">
+            <span className="energy-text" style={{ color: ch.colorLight }}>⚡{player.energy}/{player.energyMax}</span>
+            {player.abilityUseCount > 0 && (
+              <span className="ability-count" style={{ color: ch.color, fontSize: 11, marginLeft: 4 }}>
+                能力×{player.abilityUseCount}
+              </span>
+            )}
+            {player.isHuman && player.energy >= 100 && isActive && (
+              <button className="toggle-btn-sm ability-btn" onClick={() => { if (activateAbility()) setFlashKey(k => k + 1); }}
+                style={{ fontSize: 11, marginLeft: 6, padding: '2px 8px', background: ch.color, color: '#fff', border: 'none', borderRadius: 4, cursor: 'pointer' }}
+                title="消耗100能量发动能力">发动能力</button>
+            )}
           </div>
           <div className="player-toggles">
             <button className={`toggle-btn-sm ${autoSelfDiscard ? 'toggle-on' : ''}`}
@@ -214,6 +262,8 @@ const PlayerSection: React.FC<PlayerSectionProps> = ({ state, playerWind, select
               onClick={onToggleNoCall} title="不提示吃碰杠，只提示和牌与暗杠">不鸣牌</button>
             <button className={`toggle-btn-sm ${autoWin ? 'toggle-on' : ''}`}
               onClick={onToggleAutoWin} title="可荣和或自摸时自动和牌">自动和</button>
+            <button className={`toggle-btn-sm ${autoPlay ? 'toggle-on' : ''}`}
+              onClick={onToggleAutoPlay} title="AI托管代打，自动观战">{autoPlay ? '🤖 托管中' : '托管'}</button>
           </div>
         </div>
         {player.melds.length > 0 && (
@@ -250,15 +300,44 @@ const PlayerSection: React.FC<PlayerSectionProps> = ({ state, playerWind, select
         </div>
       </div>
 
-      {riichiWaitInfo && riichiWaitInfo.length > 0 && (
-        <div className="riichi-wait-hint">
-          打出此牌可听：
-          {riichiWaitInfo.map((tile, i) => (
-            <TileComponent key={i} tile={tile} small highlighted />
-          ))}
-          <span className="tenpai-count">共{riichiWaitInfo.length}种</span>
-        </div>
-      )}
+      {riichiWaitInfo && riichiWaitInfo.length > 0 && (() => {
+        // 计算可见枚数
+        const count = new Map<string, number>();
+        const visible = [
+          ...player.hand,
+          ...state.players.flatMap(p => p.discards),
+          ...state.players.flatMap(p => p.melds).flatMap(m => m.tiles),
+          ...state.doraIndicators,
+        ];
+        for (const t of visible) {
+          const k = `${t.suit}${t.value}`;
+          count.set(k, (count.get(k) || 0) + 1);
+        }
+        // 去重
+        const seen = new Map<string, Tile>();
+        for (const t of riichiWaitInfo) {
+          const k = `${t.suit}${t.value}`;
+          if (!seen.has(k)) seen.set(k, t);
+        }
+        const uniq = [...seen.values()];
+        return (
+          <div className="riichi-wait-hint">
+            打出此牌可听：
+            {uniq.map((tile, i) => {
+              const k = `${tile.suit}${tile.value}`;
+              const visibleCnt = count.get(k) || 0;
+              const remain = Math.max(0, 4 - visibleCnt);
+              return (
+                <span key={i} className="tenpai-tile-group">
+                  <TileComponent tile={tile} small highlighted />
+                  <span className="tenpai-remain">{remain}枚</span>
+                </span>
+              );
+            })}
+            <span className="tenpai-count">共{uniq.length}种</span>
+          </div>
+        );
+      })()}
     </div>
   );
 };
@@ -278,16 +357,50 @@ const TenpaiFloat: React.FC<{ state: GameState; riichiWaitTiles: Tile[] | null }
     try { return checkTenpai(h, player.melds); } catch { return null; }
   }, [player.hand, player.melds, state.drawnTile]);
 
-  const tiles = riichiWaitTiles && riichiWaitTiles.length > 0 ? riichiWaitTiles
+  // 计算每种待牌在牌山中的剩余枚数（4 - 可见枚数）
+  const wallRemain = React.useMemo(() => {
+    const count = new Map<string, number>();
+    // 可见：自己手牌 + 所有弃牌 + 所有鸣牌 + 宝牌指示牌
+    const visible = [
+      ...player.hand,
+      ...state.players.flatMap(p => p.discards),
+      ...state.players.flatMap(p => p.melds).flatMap(m => m.tiles),
+      ...state.doraIndicators,
+    ];
+    for (const t of visible) {
+      const k = `${t.suit}${t.value}`;
+      count.set(k, (count.get(k) || 0) + 1);
+    }
+    return count;
+  }, [player.hand, state.players, state.doraIndicators]);
+
+  const rawTiles = riichiWaitTiles && riichiWaitTiles.length > 0 ? riichiWaitTiles
     : (tenpai && tenpai.waitTiles.length > 0 ? tenpai.waitTiles : null);
 
-  if (!tiles || tiles.length === 0) return null;
+  if (!rawTiles || rawTiles.length === 0) return null;
+
+  // 去重（按 suit+value），计算每种牌的剩余枚数
+  const seen = new Map<string, Tile>();
+  for (const t of rawTiles) {
+    const k = `${t.suit}${t.value}`;
+    if (!seen.has(k)) seen.set(k, t);
+  }
+  const tiles = [...seen.values()];
+
   return (
     <div className="riichi-wait-hint">
       {riichiWaitTiles && riichiWaitTiles.length > 0 ? '打出此牌可听：' : '听牌：'}
-      {tiles.map((tile, i) => (
-        <TileComponent key={i} tile={tile} small highlighted />
-      ))}
+      {tiles.map((tile, i) => {
+        const k = `${tile.suit}${tile.value}`;
+        const visible = wallRemain.get(k) || 0;
+        const remain = Math.max(0, 4 - visible);
+        return (
+          <span key={i} className="tenpai-tile-group">
+            <TileComponent tile={tile} small highlighted />
+            <span className="tenpai-remain">{remain}枚</span>
+          </span>
+        );
+      })}
       <span className="tenpai-count">共{tiles.length}种</span>
     </div>
   );
@@ -312,18 +425,31 @@ const DiscardArea: React.FC<{ state: GameState }> = ({ state }) => {
             {player.discards.length === 0 ? (
               <span className="discard-empty">-</span>
             ) : (
-              player.discards.map((tile, j) => (
-                <TileComponent key={`d${i}-${j}`} tile={tile} small dimmed
-                  isRiichi={player.isRiichi && player.riichiDiscardIndex === j}
-                  isCalled={humanCanCall && state.lastDiscard?.id === tile.id}
-                  className={state.claimedDiscardTileIds.includes(tile.id) ? 'tile-claimed' : ''} />
-              ))
+              player.discards.map((tile, j) => {
+                // 概率隐藏：用 tile.id 的 hash 决定是否显示牌背
+                const hidden = player.hideDiscards > 0 && 
+                  player.hideDiscards >= 1 ? true :
+                  ((tile.id * 2654435761 >>> 0) / 4294967296) < player.hideDiscards;
+                return hidden ? (
+                  <div key={`d${i}-${j}`} className="tile tile-back tile-small" />
+                ) : (
+                  <TileComponent key={`d${i}-${j}`} tile={tile} small dimmed
+                    isRiichi={player.isRiichi && player.riichiDiscardIndex === j}
+                    isCalled={humanCanCall && state.lastDiscard?.id === tile.id}
+                    className={state.claimedDiscardTileIds?.includes(tile.id) ? 'tile-claimed' : ''} />
+                );
+              })
             )}
           </div>
         </div>
       ))}
       <div className="wall-info">
         <span className="wall-count">残 {state.wall.length} 枚</span>
+        {state.players[humanWind].seeNextDraw && state.wall.length > 0 && (
+          <span className="next-draw" style={{ marginLeft: 12, color: '#ffd700' }}>
+            下一张: <TileComponent tile={state.wall[0]} small />
+          </span>
+        )}
       </div>
       <div className="dora-section">
         {state.doraIndicators.map((tile, i) => {

@@ -40,6 +40,11 @@ export interface GameControllerAPI {
   difficulty: DifficultyLevel;
   /** 设置难度 */
   setDifficulty: (level: DifficultyLevel) => void;
+  /** 托管模式 */
+  autoPlay: boolean;
+  setAutoPlay: (on: boolean) => void;
+  /** 发动能力 */
+  activateAbility: () => boolean;
   /** 下载游戏日志 (Ctrl+L) */
   downloadLog: () => void;
 }
@@ -57,7 +62,7 @@ function buildTeamRoster(chars: { name: string }[]): { name: string }[][] {
   return roster;
 }
 
-export function useGame(characters?: { name: string }[], gameLength = 2): GameControllerAPI {
+export function useGame(characters?: { name: string }[], gameLength = 4): GameControllerAPI {
   const isTeamMode = characters && characters.length > 4;
   const teamRosterRef = useRef<{ name: string }[][] | null>(null);
   const currentRoundRef = useRef(0);
@@ -79,6 +84,7 @@ export function useGame(characters?: { name: string }[], gameLength = 2): GameCo
   const [riichiMode, setRiichiMode] = useState(false);
   const [riichiValidTileIds, setRiichiValidTileIds] = useState<Map<number, TenpaiInfo>>(new Map());
   const [difficulty, setDifficultyState] = useState<DifficultyLevel>('easy');
+  const [autoPlay, setAutoPlayState] = useState(false);
   const ctrlRef = useRef<GameController | null>(null);
   const charsRef = useRef(initialChars);
   const gameLengthRef = useRef(gameLength);
@@ -89,7 +95,7 @@ export function useGame(characters?: { name: string }[], gameLength = 2): GameCo
 
   // 首次挂载：创建控制器并订阅
   useEffect(() => {
-    const ctrl = new GameController(charsRef.current, gameLengthRef.current);
+    const ctrl = new GameController(charsRef.current, gameLengthRef.current, isTeamMode ? 200000 : undefined);
     ctrlRef.current = ctrl;
     const logger = new GameLogger();
     loggerRef.current = logger;
@@ -105,6 +111,8 @@ export function useGame(characters?: { name: string }[], gameLength = 2): GameCo
     setIsAiThinking(true);
     const aiStateRef = { current: (() => {}) as () => void };
     const t = setTimeout(() => {
+      ctrl.setDifficulty(difficulty);
+      ctrl.setAutoPlay(autoPlay);
       ctrl.start();
       aiStateRef.current = ctrl.subscribe((s) => {
         setIsAiThinking(
@@ -139,8 +147,11 @@ export function useGame(characters?: { name: string }[], gameLength = 2): GameCo
     const segIdx = currentRoundRef.current;
     if (segIdx >= 4) return; // All 5 segments done (0-4)
 
-    // Save current scores and start next segment with new players
+    // Save current scores and energy, start next segment with new players
     const scores = state.players.map(p => p.score);
+    const energies = state.players.map(p => p.energy);
+    const abilityCounts = state.players.map(p => p.abilityUseCount);
+    const swapCosts = state.players.map(p => p.swapEnergyCost);
     const nextPlayers = roster.map(team => team[segIdx + 1]);
     const ctrl = ctrlRef.current;
     if (!ctrl) return;
@@ -150,7 +161,7 @@ export function useGame(characters?: { name: string }[], gameLength = 2): GameCo
     const checkInit = () => {
       const s = ctrl.state;
       if (s.phase === GamePhase.DRAWING || s.phase === GamePhase.DISCARDING || s.phase === GamePhase.ACTION_PROMPT) {
-        s.players.forEach((p, i) => { p.score = scores[i]; });
+        s.players.forEach((p, i) => { p.score = scores[i]; p.energy = energies[i]; p.abilityUseCount = abilityCounts[i]; p.swapEnergyCost = swapCosts[i]; });
         currentRoundRef.current = segIdx + 1;
         setMessages(prev => [...prev.slice(-99), `🏁 第${segIdx + 2}轮开始！`]);
       } else {
@@ -327,6 +338,18 @@ export function useGame(characters?: { name: string }[], gameLength = 2): GameCo
     setDifficultyState(level);
   }, []);
 
+  const setAutoPlay = useCallback((on: boolean) => {
+    const ctrl = ctrlRef.current;
+    if (ctrl) ctrl.setAutoPlay(on);
+    setAutoPlayState(on);
+  }, []);
+
+  const activateAbility = useCallback((): boolean => {
+    const ctrl = ctrlRef.current;
+    if (!ctrl) return false;
+    return ctrl.activateAbility();
+  }, []);
+
   const downloadLog = useCallback(() => {
     loggerRef.current?.download();
   }, []);
@@ -339,6 +362,8 @@ export function useGame(characters?: { name: string }[], gameLength = 2): GameCo
     swapMode, swapSourceTileId, enterSwapMode, executeSwap, cancelSwap,
     riichiMode, riichiValidTileIds, cancelRiichi,
     difficulty, setDifficulty,
+    autoPlay, setAutoPlay,
+    activateAbility,
     downloadLog,
   };
 }

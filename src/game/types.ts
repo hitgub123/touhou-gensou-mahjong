@@ -65,7 +65,64 @@ export interface Player {
   hasCalled: boolean;
   /** 食替限制：不能打出的牌的 tileKey 列表（鸣牌后下巡生效） */
   restrictedDiscardKeys: string[];
+  /** 能量槽 (0~energyMax) */
+  energy: number;
+  /** 能量槽上限 */
+  energyMax: number;
+  /** 每弃牌增加能量 */
+  energyPerDiscard: number;
+  /** 每摸牌增加能量 */
+  energyPerDraw: number;
+  /** 每鸣牌增加能量 */
+  energyPerMeld: number;
+  /** 每立直增加能量 */
+  energyPerRiichi: number;
+  /** 每和牌增加能量 */
+  energyPerWin: number;
+  /** 本局能力使用次数（继承到下一局） */
+  abilityUseCount: number;
+  /** 换牌消耗能量（默认200，特殊角色可降低） */
+  swapEnergyCost: number;
+  /** 琪露诺冰冻：下次摸牌必须自摸切 */
+  frozenByCirno: boolean;
+  /** 跳过下次摸牌（冬眠、距離等） */
+  skipNextDraw: boolean;
+  /** 弃牌对对手不可见（蟲群、煙幕等） */
+  hideDiscards: number;  // 0=正常显示, >0=每张弃牌以此概率显示牌背(露米娅等)
+  /** 书库检索：可见牌山下一张（小恶魔等） */
+  seeNextDraw: boolean;
+  /** 本局已发动过能力（红美玲等每局限一次用此计数） */
+  abilityUsedThisHand: number;
+  /** 人偶计数（爱丽丝） */
+  dollCount: number;
+  /** 死誘宝牌（幽幽子标记的手牌ID） */
+  deathDoraIds: number[];
+  /** joker花色（米斯蒂娅1s/辉夜1p当任意牌，null=无） */
+  jokerSuit: string | null;
+  /** 疫病：被指定本局无法使用技能（黑谷山女） */
+  abilityBlocked: boolean;
+  /** 嫉妬：被指定本局无法增加能量（水桥帕露希） */
+  energyGainBlocked: boolean;
+  /** 読心：复制目标技能（古明地觉，null=未复制） */
+  satoriCopyTarget: Wind | null;
+  /** 読心：复制是否已生效过一局 */
+  satoriCopyUsed: boolean;
+  /** 読書：下局摸/打字牌+20能量（本居小铃） */
+  readingMode: boolean;
+  /** 境界視：摸牌大概率中张（宇佐见莲子） */
+  drawBiasMiddle: boolean;
+  /** 夢幻：摸牌大概率幺九（玛艾露贝莉） */
+  drawBiasTerminal: boolean;
 }
+
+/** 能量槽默认配置 */
+export const DEFAULT_ENERGY_MAX = 1000;
+export const DEFAULT_ENERGY_PER_DISCARD = 20;
+export const DEFAULT_ENERGY_PER_DRAW = 0;
+export const DEFAULT_ENERGY_PER_MELD = 40;
+export const DEFAULT_ENERGY_PER_RIICHI = 40;
+export const DEFAULT_ENERGY_PER_WIN = 0;
+export const DEFAULT_SWAP_ENERGY_COST = 200;
 
 /** 牌局阶段 */
 export const GamePhase = {
@@ -121,6 +178,12 @@ export interface WinResult {
   basePoints: number;
   payments: { player: Wind; amount: number }[];
   winnerGets: number;
+  /** 不含本场費/立直棒的纯牌点数 */
+  basePayment: number;
+  /** 本场費加算 */
+  honbaAddition: number;
+  /** 立直棒回收 */
+  riichiBonus: number;
   isDealerWin: boolean;
   handTiles: Tile[];
 }
@@ -171,6 +234,20 @@ export interface GameState {
   isLastDraw?: boolean;     // 当前是否为最后一张牌（海底/河底用）
   claimedDiscardTileIds: number[];  // 被鸣牌后被移出弃牌区的牌ID（保留在弃牌区但半透明）
   gameLength: number;        // 游戏长度: 1=东风 2=东南 3=东西 4=东北
+  /** 灵梦护符：下局灵梦的弃牌不可被鸣牌（吃碰杠） */
+  reimuCharm: boolean;
+  /** 铃仙狙击：预留摸牌 */
+  sniperReserve: { tileKey: string; suit: string; value: number; targetWind: Wind } | null;
+  /** 本局所有玩家技能发动总次数（蕾蒂冬眠用） */
+  totalAbilityUses: number;
+  /** 四季映姬審判：所有玩家手牌可见 */
+  seeAllHands: boolean;
+  /** 咲夜额外一巡标记（内部用） */
+  _sakuyaExtraTurn?: boolean;
+  /** 星熊勇仪怪力：下局配牌有三色同顺 */
+  yuugiSanshoku?: boolean;
+  /** 桑尼光屈折：下局配牌后对手付饼子税 */
+  sunnyTaxPending?: boolean;
 }
 
 /** 角色定义 */
@@ -187,7 +264,7 @@ export interface TouhouCharacter {
 // 常量
 // ============================================================
 
-export const INITIAL_SCORE = 25000;
+export const INITIAL_SCORE = 100000;
 export const RIICHI_AMOUNT = 1000;
 
 export const WIND_NAMES: Record<Wind, string> = {

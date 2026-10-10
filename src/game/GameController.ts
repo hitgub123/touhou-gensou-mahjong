@@ -7,13 +7,15 @@
  *  - 暴露人类操作接口
  *  - 通过订阅通知状态变更
  */
-import type { Tile, GameState } from './types';
+import type { Tile, GameState, Player } from './types';
 import { MeldType, GamePhase, Wind, WINDS } from './types';
+import { checkTenpai } from './hand';
 import {
   createInitialState, drawTile, discardTile, executeMeld, executeWin,
   nextTurn, createNextHand, executeNineOrphans, getDrawActions,
   emptyActions,
 } from './gameEngine';
+import { getAbilityCost, executeInstantAbility } from './abilities';
 import { sortHand } from './tiles';
 import { aiChooseDiscard, aiChooseAction, aiDecideRiichi } from './ai';
 import { sameTile } from './tiles';
@@ -28,16 +30,181 @@ export class GameController {
   private _difficulty: DifficultyConfig = DIFFICULTY_NORMAL;
   private _characters?: { name: string }[];
   private _gameLength: number;
+  private _autoPlay = false;
+  private _autoAdvanceScheduled = false; // 防止重复调度自动下一局
 
-  constructor(characters?: { name: string }[], gameLength = 2) {
+  constructor(characters?: { name: string }[], gameLength = 4, initialScore?: number) {
     this._characters = characters;
     this._gameLength = gameLength;
-    this._state = createInitialState(characters, undefined, gameLength);
+    this._state = createInitialState(characters, undefined, gameLength, initialScore);
   }
 
   /** 设置 AI 难度 */
   setDifficulty(level: DifficultyLevel): void {
     this._difficulty = getDifficulty(level);
+  }
+
+  /** 托管模式：true=AI 代打人类玩家 */
+  setAutoPlay(on: boolean): void {
+    this._autoPlay = on;
+    if (on) {
+      this.log('🤖 托管模式开启');
+      this.schedule(50); // 立即触发 tick
+    } else {
+      this.log('🙋 手动模式');
+    }
+  }
+
+  get autoPlay(): boolean { return this._autoPlay; }
+
+  /** 发动能力：消耗角色特定能量，abilityUseCount+1。仅限自己的出牌回合 */
+  activateAbility(targetWind?: Wind, extraTile?: { suit: string; value: number }): boolean {
+    const s = this._state;
+    const cp = s.players[s.currentPlayer];
+    if (!cp) return false;
+    // ── 八意永琳薬学：其他玩家能量消耗翻倍 ──
+    let energyCost = 100;
+    for (const p of s.players) {
+      if (p.name === '八意永琳' && p.abilityUsedThisHand > 0 && p.wind !== s.currentPlayer) {
+        energyCost = 200;
+        break;
+      }
+    }
+    if (cp.energy < energyCost) {
+      this.log(`⚡ 能量不足${energyCost}，无法发动能力`);
+      return false;
+    }
+    if (s.phase !== GamePhase.DISCARDING && s.phase !== GamePhase.ACTION_PROMPT) {
+      this.log('⛔ 只能在出牌回合发动能力');
+      return false;
+    }
+    // ── 黑谷山女疫病：被封锁无法发动 ──
+    if (cp.abilityBlocked) {
+      this.log(`🕷️ ${cp.name} 被疫病封锁，本局无法发动能力`);
+      return false;
+    }
+
+    const players = s.players.map(p => ({ ...p }));
+    players[s.currentPlayer].abilityUseCount++;
+    players[s.currentPlayer].energy -= energyCost;
+    s.totalAbilityUses++;
+    this.log(`⚡ ${cp.name} 发动能力！(消耗${energyCost}，剩余${players[s.currentPlayer].energy}，累计${players[s.currentPlayer].abilityUseCount}次)`);
+
+    // ── 橙/八云蓝 TAX：其他玩家发动技能时需支付分数/能量 ──
+    for (let i = 0; i < 4; i++) {
+      if (i === s.currentPlayer) continue;
+      const taxer = players[i];
+      if (taxer.name === '橙') {
+        if (players[s.currentPlayer].score < 1000) {
+          this.log(`🐱 ${cp.name} 分数不足1000，无法发动技能（橙の式神）`);
+          return false;
+        }
+        players[s.currentPlayer].score -= 1000;
+        taxer.score += 1000;
+        this.log(`🐱 式神：${cp.name} → ${taxer.name} 支付1000分`);
+      }
+      if (taxer.name === '八云蓝') {
+        if (players[s.currentPlayer].energy < 20) {
+          this.log(`🦊 ${cp.name} 能量不足20，无法发动技能（藍の九尾）`);
+          return false;
+        }
+        players[s.currentPlayer].energy -= 20;
+        taxer.energy = Math.min(taxer.energyMax, taxer.energy + 20);
+        this.log(`🦊 九尾：${cp.name} → ${taxer.name} 支付20能量`);
+      }
+    }
+
+    // ── 牌山检查（铃仙/文）先扣能量再检查，没牌就白费能量 ──
+    if (cp.name === '铃仙·优昙华院·因幡' && extraTile) {
+      const key = `${extraTile.value}${extraTile.suit}`;
+      const found = s.wall.some(t => t.suit === extraTile.suit && t.value === extraTile.value);
+      if (!found) {
+        this._state = { ...s, players };
+        this.log(`🎯 牌山中没有${key}，狙击失败（能量已消耗）`);
+        this.emit();
+        return true;
+      }
+    }
+    if (cp.name === '射命丸文' && s.wall.length === 0) {
+      this._state = { ...s, players };
+      this.log('🍃 牌山已空，風速失败（能量已消耗）');
+      this.emit();
+      return true;
+    }
+
+    // ── 灵梦护符：下局不可鸣牌 ──
+    if (cp.name === '博丽灵梦') {
+      this._state = { ...s, players, reimuCharm: true };
+      this.log('🛡️ 博丽护符：下一局自己打出的牌不可被鸣牌');
+      this.emit();
+      return true;
+    }
+
+    // ── 琪露诺冰冻：所有对手强制自摸切 ──
+    if (cp.name === '琪露诺') {
+      for (let i = 0; i < 4; i++) {
+        if (i !== s.currentPlayer) {
+          players[i].frozenByCirno = true;
+        }
+      }
+      this._state = { ...s, players };
+      this.log('❄️ 氷結！所有对手下一次摸牌必须自摸切');
+      this.emit();
+      return true;
+    }
+
+    // ── 咲夜时间操作：标记额外一巡 ──
+    if (cp.name === '十六夜咲夜') {
+      this._state = { ...s, players, _sakuyaExtraTurn: true };
+      this.log('⏰ 时间操作：弃牌后将额外进行一次摸牌+弃牌');
+      this.emit();
+      return true;
+    }
+
+    // ── 古明地觉読心：下局复制目标技能 ——
+    // 如果本局 satoriCopyTarget 已生效，则用目标角色名匹配技能
+    const effectiveName = (cp.satoriCopyTarget !== null && cp.satoriCopyUsed)
+      ? (s.players[cp.satoriCopyTarget]?.name || cp.name)
+      : cp.name;
+
+    // ── 简单即时效果（按角色名匹配） ──
+    const handled = this.applySimpleEffect(effectiveName, s, players, targetWind, extraTile);
+    if (handled !== null) {
+      this._state = handled;
+      // ── 古明地恋無意識：他人发动技能后能量清0 ──
+      for (const op of this._state.players) {
+        if (op.name === '古明地恋' && op.abilityUsedThisHand > 0 && op.wind !== s.currentPlayer) {
+          const actor = this._state.players[s.currentPlayer];
+          actor.energy = 0;
+          this.log(`💜 無意識：${actor.name} 能量归零`);
+        }
+      }
+      this.emit();
+      return true;
+    }
+
+    // ── 即时能力（妖梦、文、铃仙） ──
+    const result = executeInstantAbility(effectiveName, { ...s, players }, s.currentPlayer, targetWind, extraTile);
+    if (result.ok && result.state) {
+      this._state = result.state;
+      this.log(result.message);
+    } else {
+      // 失败也扣能量（不退还）
+      this._state = { ...s, players };
+      this.log(result.message || '能力发动失败');
+    }
+
+    // ── 古明地恋無意識：他人发动技能后能量清0（即时能力路径） ──
+    for (const op of this._state.players) {
+      if (op.name === '古明地恋' && op.abilityUsedThisHand > 0 && op.wind !== s.currentPlayer) {
+        const actor = this._state.players[s.currentPlayer];
+        actor.energy = 0;
+        this.log(`💜 無意識：${actor.name} 能量归零`);
+      }
+    }
+
+    this.emit();
+    return true;
   }
 
   /** 获取当前难度 */
@@ -89,12 +256,53 @@ export class GameController {
   // ── Game Loop ──
 
   private tick() {
+    // 托管模式：终局后自动推进
+    if (this._autoPlay && !this._autoAdvanceScheduled) {
+      if (this._state.phase === GamePhase.HAND_OVER) {
+        this._autoAdvanceScheduled = true;
+        this.log('⏱️ 5秒后自动下一局...');
+        this.schedule(5000);
+        return;
+      }
+      if (this._state.phase === GamePhase.GAME_OVER) {
+        this._autoAdvanceScheduled = true;
+        this.log('🔄 游戏结束，5秒后自动新游戏...');
+        this.schedule(5000);
+        return;
+      }
+    }
+
+    // 托管模式：定时器到期，执行推进
+    if (this._autoPlay && this._autoAdvanceScheduled) {
+      this._autoAdvanceScheduled = false;
+      if (this._state.phase === GamePhase.HAND_OVER) {
+        this.nextHand();
+        return;
+      }
+      if (this._state.phase === GamePhase.GAME_OVER) {
+        this.newGame();
+        return;
+      }
+    }
+
     if (this._state.phase === GamePhase.HAND_OVER || this._state.phase === GamePhase.GAME_OVER) return;
 
     let s = this._state;
 
     // DRAWING: 自动摸牌
     if (s.phase === GamePhase.DRAWING) {
+      const cp = s.players[s.currentPlayer];
+      if (cp.skipNextDraw) {
+        // 冬眠/距離：跳过摸牌
+        const players = s.players.map(p => ({ ...p }));
+        players[s.currentPlayer].skipNextDraw = false;
+        s = { ...s, players, phase: GamePhase.DISCARDING, drawnTile: undefined };
+        this.log(`⏭️ ${cp.name} 跳过摸牌`);
+        this._state = s;
+        this.emit();
+        this.schedule(400);
+        return;
+      }
       s = drawTile(s);
       this._state = s;
       this.emit();
@@ -105,13 +313,35 @@ export class GameController {
     // DISCARDING
     if (s.phase === GamePhase.DISCARDING) {
       const cp = s.players[s.currentPlayer];
-      if (!cp.isHuman) {
+      if (!cp.isHuman || this._autoPlay) {
         s = this.aiDiscard(s);
+        // 咲夜时间操作：额外一巡（弃牌后再摸再弃）
+        if (s._sakuyaExtraTurn && s.phase === GamePhase.ACTION_PROMPT) {
+          s = { ...s, _sakuyaExtraTurn: undefined };
+          s = drawTile(s);
+          s = this.aiDiscard(s);
+          this.log('⏰ 咲夜完成额外一巡');
+        }
         this._state = s;
         this.emit();
         this.schedule(s.phase === GamePhase.ACTION_PROMPT ? 400 : 50);
       }
-      // 人类: 等待点击（自摸切由 App 层的 autoSelfDiscard 控制）
+      // 人类非托管: 等待点击（自摸切由 App 层的 autoSelfDiscard 控制）
+      // 但琪露诺冰冻时强制自摸切
+      if (!this._autoPlay && cp.isHuman && cp.frozenByCirno && s.drawnTile) {
+        const acts = s.actionsAvailable[s.currentPlayer];
+        if (acts?.canTsumo) {
+          this._state = executeWin(s, s.currentPlayer, true);
+          this.log('❄️ 冰冻中自摸和牌！');
+        } else {
+          const result = discardTile(s, s.drawnTile.id);
+          result.players[s.currentPlayer].frozenByCirno = false;
+          this._state = result;
+          this.log('❄️ 被冰冻，强制自摸切');
+        }
+        this.emit();
+        this.schedule(400);
+      }
       return;
     }
 
@@ -119,6 +349,59 @@ export class GameController {
     if (s.phase === GamePhase.ACTION_PROMPT) {
       const humanWind = WINDS.find(w => s.players[w].isHuman) ?? 0;
       const humanAct = s.actionsAvailable[humanWind];
+
+      // 托管模式：人类动作也由 AI 处理，不等待
+      if (this._autoPlay) {
+        if (s.lastDiscard) {
+          // 有人弃牌 → 所有玩家（含人类）响应
+          const next = this.processAllResponses(s);
+          if (next) { this._state = next; this.emit(); this.schedule(400); return; }
+          // 无人响应 → 振听 + 下一家
+          let furiten = s;
+          for (const w of WINDS) {
+            if (w !== s.currentPlayer && s.actionsAvailable[w]?.canRon) {
+              if (!furiten.furitenPlayers.includes(w)) {
+                furiten = { ...furiten, furitenPlayers: [...furiten.furitenPlayers, w] };
+              }
+            }
+          }
+          this._state = nextTurn(furiten);
+          this.emit();
+          this.schedule(50);
+        } else {
+          // 人类摸牌后 → AI 决策：自摸 > 立直 > 暗杠 > 加杠 > 弃牌
+          const cp = s.players[s.currentPlayer];
+          if (humanAct?.canTsumo) {
+            this._state = executeWin(s, s.currentPlayer, true);
+          } else if (humanAct?.canRiichi && aiDecideRiichi(cp.hand, s, s.currentPlayer, this._difficulty)) {
+            // 立直：找一张能听牌的牌打出
+            const tile = aiChooseDiscard(cp.hand, undefined, s, s.currentPlayer, this._difficulty);
+            if (tile) {
+              const isFirstTurn = s.turn <= 2 && cp.discards.length === 0 && !cp.hasCalled;
+              const marked = {
+                ...s,
+                riichiSticks: s.riichiSticks + 1,
+                players: s.players.map((p, i) =>
+                  i === s.currentPlayer
+                    ? { ...p, isRiichi: true, isDoubleRiichi: isFirstTurn, riichiTurnStart: s.turn, score: p.score - 1000, energy: !p.energyGainBlocked ? Math.min(p.energyMax, p.energy + p.energyPerRiichi) : p.energy }
+                    : p
+                ),
+              };
+              this._state = discardTile(marked, tile.id);
+            } else {
+              this._state = { ...s, phase: GamePhase.DISCARDING };
+            }
+          } else if (humanAct?.canAnkan || humanAct?.canKakan) {
+            // 暗杠/加杠暂不自动处理，进入弃牌
+            this._state = { ...s, phase: GamePhase.DISCARDING };
+          } else {
+            this._state = { ...s, phase: GamePhase.DISCARDING };
+          }
+          this.emit();
+          this.schedule(400);
+        }
+        return;
+      }
 
       // 人类有响应选项 → 等待
       if (s.lastDiscard && humanAct && (humanAct.canRon || humanAct.canPon || humanAct.canChi || humanAct.canKan)) return;
@@ -160,6 +443,48 @@ export class GameController {
   /** AI 自动弃牌（支持立直） */
   private aiDiscard(s: GameState): GameState {
     const cp = s.players[s.currentPlayer];
+
+    // 琪露诺冰冻：必须自摸切（除非能暗杠/立直/和牌）
+    if (cp.frozenByCirno) {
+      const acts = s.actionsAvailable[s.currentPlayer];
+      if (acts?.canTsumo) {
+        this.log(`❄️ ${cp.name} 冰冻中自摸和牌！`);
+        return executeWin(s, s.currentPlayer, true);
+      }
+      if (acts?.canRiichi && aiDecideRiichi(cp.hand, s, s.currentPlayer, this._difficulty)) {
+        this.log(`❄️ ${cp.name} 冰冻中立直！`);
+        const tile = aiChooseDiscard(cp.hand, undefined, s, s.currentPlayer, this._difficulty);
+        if (tile) {
+          const isFirstTurn = s.turn <= 2 && cp.discards.length === 0 && !cp.hasCalled;
+          const marked = {
+            ...s,
+            riichiSticks: s.riichiSticks + 1,
+            players: s.players.map((p, i) =>
+              i === s.currentPlayer
+                ? { ...p, isRiichi: true, isDoubleRiichi: isFirstTurn, riichiTurnStart: s.turn, score: p.score - 1000, energy: !p.energyGainBlocked ? Math.min(p.energyMax, p.energy + p.energyPerRiichi) : p.energy }
+                : p
+            ),
+          };
+          const result = discardTile(marked, tile.id);
+          // 清除冰冻标记
+          result.players[s.currentPlayer].frozenByCirno = false;
+          return result;
+        }
+      }
+      if (acts?.canAnkan) {
+        this.log(`❄️ ${cp.name} 冰冻中暗杠！`);
+        // 简化处理：暗杠（TODO: 完整暗杠逻辑）
+      }
+      // 强制自摸切
+      if (s.drawnTile) {
+        this.log(`❄️ ${cp.name} 被冰冻，强制自摸切`);
+        const result = discardTile(s, s.drawnTile.id);
+        result.players[s.currentPlayer].frozenByCirno = false;
+        return result;
+      }
+      return s;
+    }
+
     // 食替：从手牌中排除被限制的牌
     const validHand = cp.restrictedDiscardKeys.length > 0
       ? cp.hand.filter(t => !cp.restrictedDiscardKeys.includes(`${t.value}${t.suit}`))
@@ -176,7 +501,7 @@ export class GameController {
         riichiSticks: s.riichiSticks + 1,
         players: s.players.map((p, i) =>
           i === s.currentPlayer
-            ? { ...p, isRiichi: true, isDoubleRiichi: isFirstTurn, riichiTurnStart: s.turn, score: p.score - 1000 }
+            ? { ...p, isRiichi: true, isDoubleRiichi: isFirstTurn, riichiTurnStart: s.turn, score: p.score - 1000, energy: !p.energyGainBlocked ? Math.min(p.energyMax, p.energy + p.energyPerRiichi) : p.energy }
             : p
         ),
       };
@@ -187,14 +512,27 @@ export class GameController {
 
   /** AI 响应（荣和 > 碰 > 吃） */
   private processAiResponses(s: GameState): GameState | null {
+    return this.processResponses(s, false);
+  }
+
+  /** 所有玩家响应（托管模式下含人类） */
+  private processAllResponses(s: GameState): GameState | null {
+    return this.processResponses(s, true);
+  }
+
+  private processResponses(s: GameState, includeHuman: boolean): GameState | null {
     for (const wind of WINDS) {
       if (wind === s.currentPlayer) continue;
       const actions = s.actionsAvailable[wind];
       if (!actions) continue;
       const player = s.players[wind];
-      if (player.isHuman) continue;
+      if (!includeHuman && player.isHuman) continue; // 非托管模式跳过人类
       const choice = aiChooseAction(s, wind, this._difficulty);
-      if (choice === 'ron' && actions.canRon) return executeWin(s, wind, false);
+      if (choice === 'ron' && actions.canRon) {
+        if (s.phase !== GamePhase.HAND_OVER && s.phase !== GamePhase.GAME_OVER) {
+          return executeWin(s, wind, false);
+        }
+      }
       if (choice === 'pon' && actions.canPon && s.lastDiscard) {
         const matching = player.hand.filter(t => sameTile(t, s.lastDiscard!));
         if (matching.length >= 2) {
@@ -266,7 +604,19 @@ export class GameController {
 
     const newState = discardTile(s, tileId);
     if (newState !== s) {
-      this._state = newState;
+      // 咲夜时间操作：额外一巡
+      let finalState = newState;
+      if (newState._sakuyaExtraTurn && newState.phase === GamePhase.ACTION_PROMPT) {
+        finalState = { ...newState, _sakuyaExtraTurn: undefined };
+        finalState = drawTile(finalState);
+        // AI 自动弃牌（即使是人类玩家，额外一巡也自动处理）
+        const cp2 = finalState.players[finalState.currentPlayer];
+        if (cp2.isHuman || this._autoPlay) {
+          finalState = this.aiDiscard(finalState);
+          this.log('⏰ 咲夜完成额外一巡');
+        }
+      }
+      this._state = finalState;
       this.emit();
       this.schedule(50);
       return true;
@@ -284,7 +634,7 @@ export class GameController {
       riichiSticks: s.riichiSticks + 1,
       players: s.players.map((p, i) =>
         i === s.currentPlayer
-          ? { ...p, isRiichi: true, isDoubleRiichi: isFirstTurn, riichiTurnStart: s.turn, score: p.score - 1000 }
+          ? { ...p, isRiichi: true, isDoubleRiichi: isFirstTurn, riichiTurnStart: s.turn, score: p.score - 1000, energy: !p.energyGainBlocked ? Math.min(p.energyMax, p.energy + p.energyPerRiichi) : p.energy }
           : p
       ),
     };
@@ -300,24 +650,26 @@ export class GameController {
 
     switch (action) {
       case 'tsumo':
+        if (s.phase === GamePhase.HAND_OVER || s.phase === GamePhase.GAME_OVER) break;
         if (s.actionsAvailable[humanWind]?.canTsumo) {
           this._state = executeWin(s, humanWind, true);
-          this.log('🎉 自摸和牌！');
+          if (this._state.phase === GamePhase.HAND_OVER) {
+            this.log('🎉 自摸和牌！');
+          } else {
+            this.log('⚠️ 自摸失败（牌型无效或无役）');
+          }
         }
         break;
 
       case 'ron':
-        if (!s.actionsAvailable[humanWind]?.canRon) {
-          console.warn('[AUTO-RON] blocked: canRon is false', {
-            phase: s.phase, humanWind, lastDiscard: s.lastDiscard ? s.lastDiscard.suit + s.lastDiscard.value : 'none',
-            actions: s.actionsAvailable[humanWind],
-          });
-          break;
-        }
+        if (s.phase === GamePhase.HAND_OVER || s.phase === GamePhase.GAME_OVER) break;
+        if (!s.actionsAvailable[humanWind]?.canRon) break;
         this._state = executeWin(s, humanWind, false);
-        setTimeout(() => {
-          if (this._state.phase === GamePhase.HAND_OVER) this.log('💥 荣和！');
-        }, 0);
+        if (this._state.phase === GamePhase.HAND_OVER) {
+          this.log('💥 荣和！');
+        } else {
+          this.log('⚠️ 荣和失败（牌型无效或无役）');
+        }
         break;
 
       case 'pon':
@@ -447,21 +799,29 @@ export class GameController {
     if (s.phase !== GamePhase.DISCARDING && s.phase !== GamePhase.ACTION_PROMPT) return false;
     if (s.currentPlayer !== Wind.EAST) return false;
 
+    const humanPlayer = s.players[Wind.EAST];
+    const cost = humanPlayer.swapEnergyCost ?? 200;
+    if (humanPlayer.energy < cost) {
+      this.log(`⚡ 能量不足${cost}，无法换牌（当前${humanPlayer.energy}）`);
+      return false;
+    }
+
     const suit = wallTileKey[0] as import('./types').TileSuit;
     const value = parseInt(wallTileKey[1]);
     const wallTile = s.wall.find(t => t.suit === suit && t.value === value);
     if (!wallTile) return false;
 
     const players = s.players.map(p => ({ ...p, hand: [...p.hand] }));
-    const humanPlayer = players[Wind.EAST];
-    const handIdx = humanPlayer.hand.findIndex(t => t.id === sourceTileId);
+    const humanPlayer2 = players[Wind.EAST];
+    humanPlayer2.energy -= cost;  // 扣除换牌能量
+    const handIdx = humanPlayer2.hand.findIndex(t => t.id === sourceTileId);
     if (handIdx === -1) return false;
-    const oldTile = humanPlayer.hand[handIdx];
-    humanPlayer.hand[handIdx] = wallTile;
-    if (handIdx !== humanPlayer.hand.length - 1 && s.drawnTile) {
-      const drawnIdx = humanPlayer.hand.findIndex(t => t.id === s.drawnTile!.id);
+    const oldTile = humanPlayer2.hand[handIdx];
+    humanPlayer2.hand[handIdx] = wallTile;
+    if (handIdx !== humanPlayer2.hand.length - 1 && s.drawnTile) {
+      const drawnIdx = humanPlayer2.hand.findIndex(t => t.id === s.drawnTile!.id);
       if (drawnIdx >= 0) {
-        [humanPlayer.hand[handIdx], humanPlayer.hand[drawnIdx]] = [humanPlayer.hand[drawnIdx], humanPlayer.hand[handIdx]];
+        [humanPlayer2.hand[handIdx], humanPlayer2.hand[drawnIdx]] = [humanPlayer2.hand[drawnIdx], humanPlayer2.hand[handIdx]];
       }
     }
 
@@ -493,5 +853,575 @@ export class GameController {
     // 如果没有动作（非听牌），自动触发 tick 继续流程
     if (!hasActions) this.schedule(50);
     return true;
+  }
+
+  // ── 简单能力效果分发 ──
+  private applySimpleEffect(name: string, s: GameState, players: Player[], targetWind?: Wind, extraTile?: { suit: string; value: number }): GameState | null {
+    const p = players[s.currentPlayer];
+    const wall = [...s.wall];
+
+    // === 能量操作 ===
+    if (name === '梅蒂欣·梅兰可莉') {
+      // 毒素：指定对手-30能量
+      if (targetWind === undefined) { this.log('需要指定目标'); return null; }
+      players[targetWind].energy = Math.max(0, players[targetWind].energy - 30);
+      this.log(`💀 ${name}：${s.players[targetWind].name} 能量-30`);
+      return { ...s, players };
+    }
+    if (name === '秋穰子') {
+      p.energy = Math.min(p.energyMax, p.energy + 5);
+      this.log(`🌾 豊穣：${p.name} 能量+5`);
+      return { ...s, players };
+    }
+    if (name === '豪德寺三花') {
+      p.energy = Math.min(p.energyMax, p.energy + 10);
+      this.log(`🧧 招福：${p.name} 能量+10`);
+      return { ...s, players };
+    }
+
+    // === 冬眠：本局结束后能量+20×全员技能次数 ===
+    if (name === '蕾蒂·霍瓦特洛克') {
+      this.log(`❄️ 冬眠：本局结束后能量将增加20×全员技能次数`);
+      return { ...s, players };  // 效果在 HAND_OVER 时结算
+    }
+    if (name === '小野塚小町') {
+      const next = ((s.currentPlayer + 1) % 4) as Wind;
+      players[next].skipNextDraw = true;
+      this.log(`🚣 距離：${s.players[next].name} 跳过下次摸牌`);
+      return { ...s, players };
+    }
+
+    // === 運命干渉：听牌后从牌山自摸 ===
+    if (name === '蕾米莉亚·斯卡蕾特') {
+      const tenpai = checkTenpai(p.hand, p.melds);
+      if (!tenpai) {
+        this.log('🧛 未听牌，无法发动運命干渉');
+        return { ...s, players };
+      }
+      const waitKeys = new Set(tenpai.waitTiles.map(t => `${t.value}${t.suit}`));
+      const idx = wall.findIndex(t => waitKeys.has(`${t.value}${t.suit}`));
+      if (idx < 0) {
+        this.log('🧛 牌山中无等待牌，運命干渉失败（能量已消耗）');
+        return { ...s, players };
+      }
+      // 从牌山中取出等待牌
+      const snipeTile = wall[idx];
+      wall.splice(idx, 1);
+      this.log(`🧛 運命干渉：牌山中找到${snipeTile.value}${snipeTile.suit}，下一巡自摸`);
+      return { ...s, players, wall, sniperReserve: { tileKey: `${snipeTile.value}${snipeTile.suit}`, suit: snipeTile.suit, value: snipeTile.value, targetWind: s.currentPlayer } };
+    }
+    if (name === '黑谷山女') {
+      if (targetWind === undefined) { this.log('需要指定目标'); return null; }
+      players[targetWind].abilityBlocked = true;
+      this.log(`🕷️ 疫病：${s.players[targetWind].name} 本局无法发动技能`);
+      return { ...s, players };
+    }
+
+    // === 火焰猫燐：死体移送 — 随机3张手牌与对手交换 ===
+    if (name === '火焰猫燐') {
+      if (targetWind === undefined) { this.log('需要指定目标'); return null; }
+      const opp = players[targetWind];
+      if (opp.isRiichi) { this.log('🔥 目标已立直，无法移送'); return null; }
+      if (p.hand.length < 3 || opp.hand.length < 3) { this.log('🔥 手牌不足3张'); return null; }
+      // 随机选3张自己手牌给对手
+      const myGive: Tile[] = [];
+      const myRemaining = [...p.hand];
+      for (let i = 0; i < 3; i++) {
+        const ri = Math.floor(Math.random() * myRemaining.length);
+        myGive.push(...myRemaining.splice(ri, 1));
+      }
+      // 随机选3张对手手牌给自己
+      const oppGive: Tile[] = [];
+      const oppRemaining = [...opp.hand];
+      for (let i = 0; i < 3; i++) {
+        const ri = Math.floor(Math.random() * oppRemaining.length);
+        oppGive.push(...oppRemaining.splice(ri, 1));
+      }
+      p.hand = [...myRemaining, ...oppGive];
+      opp.hand = [...oppRemaining, ...myGive];
+      this.log(`🔥 死体移送：${p.name}↔${opp.name} 交换3张手牌`);
+      return { ...s, players };
+    }
+
+    // === 破壊：对手各弃一张手牌，然后从自己弃牌区摸回一张 ===
+    if (name === '芙兰朵露·斯卡蕾特') {
+      for (let i = 0; i < 4; i++) {
+        if (i === s.currentPlayer) continue;
+        const opp = players[i];
+        if (opp.hand.length === 0) continue;
+        if (opp.isRiichi) { this.log(`💥 ${opp.name} 已立直，破壊跳过`); continue; }
+        // 弃一张手牌到弃牌区
+        const ri = Math.floor(Math.random() * opp.hand.length);
+        const removed = opp.hand[ri];
+        opp.hand = [...opp.hand.slice(0, ri), ...opp.hand.slice(ri + 1)];
+        opp.discards = [...opp.discards, removed];
+        this.log(`💥 破壊：${opp.name} 弃出${removed.value}${removed.suit}`);
+        // 从弃牌区摸一张回来
+        if (opp.discards.length > 0) {
+          const di = Math.floor(Math.random() * opp.discards.length);
+          const pickup = opp.discards[di];
+          opp.discards = [...opp.discards.slice(0, di), ...opp.discards.slice(di + 1)];
+          opp.hand = [...opp.hand, pickup];
+          this.log(`💥 破壊：${opp.name} 摸回${pickup.value}${pickup.suit}`);
+        }
+      }
+      return { ...s, players };
+    }
+    if (name === '键山雏') {
+      if (p.discards.length > 0) {
+        const d = p.discards[p.discards.length - 1];
+        players[s.currentPlayer].discards = p.discards.slice(0, -1);
+        wall.push(d);
+        const newTile = wall.shift()!;
+        players[s.currentPlayer].hand = [...p.hand, newTile];
+        this.log(`🔄 厄流し：弃牌回牌山底，摸得${newTile.value}${newTile.suit}`);
+        return { ...s, players, wall };
+      }
+      this.log('弃牌区为空');
+      return { ...s, players };
+    }
+
+    // === 手牌/牌山交换 ===
+    if (name === '帕秋莉·诺蕾姬' || name === '摩多罗隐岐奈') {
+      if (p.hand.length === 0) { this.log('手牌为空'); return { ...s, players }; }
+      if (wall.length === 0) { this.log('牌山已空'); return { ...s, players }; }
+      const handIdx = 0; // 简化：取第一张
+      const newTile = wall.shift()!;
+      wall.push(p.hand[handIdx]);
+      players[s.currentPlayer].hand = [...p.hand];
+      players[s.currentPlayer].hand.splice(handIdx, 1, newTile);
+      this.log(`📚 ${name}：手牌↔牌山交换`);
+      return { ...s, players, wall };
+    }
+    // === 境界：指定花色，整批与牌山等量交换 ===
+    if (name === '八云紫') {
+      if (!extraTile || !['m','p','s','z'].includes(extraTile.suit)) {
+        this.log('🪞 需要指定花色 (m/p/s/z)');
+        return null;
+      }
+      const suit = extraTile.suit as 'm'|'p'|'s'|'z';
+      const suitTiles = p.hand.filter(t => t.suit === suit);
+      if (suitTiles.length === 0) {
+        this.log(`🪞 手牌中无${suit}花色`);
+        return { ...s, players };
+      }
+      // 把花色牌全部随机塞回牌山
+      for (const t of suitTiles) {
+        const pos = Math.floor(Math.random() * (wall.length + 1));
+        wall.splice(pos, 0, t);
+      }
+      // 从手牌移除
+      players[s.currentPlayer].hand = p.hand.filter(t => t.suit !== suit);
+      // 从牌山随机位置摸等量牌
+      for (let i = 0; i < suitTiles.length; i++) {
+        const pos = Math.floor(Math.random() * wall.length);
+        const drawn = wall.splice(pos, 1)[0];
+        players[s.currentPlayer].hand.push(drawn);
+      }
+      this.log(`🪞 境界：${suitTiles.length}张${suit}牌与牌山交换`);
+      return { ...s, players, wall };
+    }
+    // === 人形操作：积攒人偶（被动效果在 executeWin 中） ===
+    if (name === '爱丽丝·玛格特罗依德') {
+      p.dollCount++;
+      this.log(`🎎 人形操作：人偶+1 (当前${p.dollCount}个)`);
+      return { ...s, players };
+    }
+    // === 合奏：鸣牌时对方付30能量（被动效果在 executeMeld 中） ===
+    if (name === '普莉兹姆利巴三姐妹') {
+      this.log(`🎻 合奏：本局鸣其他玩家牌时对方付30能量`);
+      return { ...s, players };  // 拦截逻辑在 executeMeld 中
+    }
+    // === 式神：本局其他玩家发动技能需支付1000分 ===
+    if (name === '橙') {
+      this.log(`🐱 式神：本局其他玩家发动技能需支付你1000分`);
+      return { ...s, players };  // 拦截逻辑在 activateAbility 中
+    }
+    if (name === '红美玲') {
+      // 気功：每局一次，获得150能量
+      if (p.abilityUsedThisHand > 0) {
+        this.log('🐉 本局已发动过気功');
+        return { ...s, players };
+      }
+      p.energy = Math.min(p.energyMax, p.energy + 150);
+      p.abilityUsedThisHand = 1;
+      this.log(`🐉 気功：${p.name} 能量+150 (当前${p.energy})`);
+      return { ...s, players };
+    }
+
+    // === 额外摸牌 ===
+    // === 九尾：本局其他玩家发动技能需支付20能量 ===
+    if (name === '八云蓝') {
+      this.log(`🦊 九尾：本局其他玩家发动技能需支付你20能量`);
+      return { ...s, players };  // 拦截逻辑在 activateAbility 中
+    }
+    if (name === '秋静叶' || name === '堀川雷鼓') {
+      if (wall.length === 0) { this.log('牌山已空'); return { ...s, players }; }
+      const t = wall.shift()!;
+      players[s.currentPlayer].hand = [...p.hand, t];
+      this.log(`➕ ${name}：额外摸得${t.value}${t.suit}`);
+      return { ...s, players, wall };
+    }
+    if (name === '若鹭姬') {
+      if (s.drawnTile && s.drawnTile.suit === 'p' && wall.length > 0) {
+        const t = wall.shift()!;
+        players[s.currentPlayer].hand = [...p.hand, t];
+        this.log(`🐟 水中の歌：筒子额外摸得${t.value}${t.suit}`);
+        return { ...s, players, wall };
+      }
+      this.log('刚摸的不是筒子，水中の歌无效');
+      return { ...s, players };
+    }
+    if (name === '高丽野阿吽') {
+      if (s.drawnTile && s.drawnTile.suit === 'z' && wall.length > 0) {
+        const t = wall.shift()!;
+        players[s.currentPlayer].hand = [...p.hand, t];
+        this.log(`🦁 阿吽：字牌额外摸得${t.value}${t.suit}`);
+        return { ...s, players, wall };
+      }
+      this.log('刚摸的不是字牌，阿吽无效');
+      return { ...s, players };
+    }
+
+    // === 查看信息 ===
+    if (name === '小恶魔') {
+      // 書庫検索：每局限一次，发动后整局可见牌山下一张
+      p.seeNextDraw = true;
+      const next = wall.length > 0 ? `${wall[0].value}${wall[0].suit}` : '无';
+      this.log(`📚 書庫検索：下一张牌=${next}（整局有效）`);
+      return { ...s, players };
+    }
+    if (name === '娜兹玲' || name === '犬走椛' || name === '九十九弁弁') {
+      const peek = wall.slice(0, Math.min(3, wall.length));
+      const names = peek.map(t => `${t.value}${t.suit}`).join(' ');
+      this.log(`🔍 ${name} 查看牌山顶：${names}`);
+      return { ...s, players };
+    }
+    if (name === '霍青娥') {
+      const pos = extraTile ? (extraTile.value % wall.length) : 0;
+      const t = wall[pos];
+      this.log(`🔍 穿牆：牌山位置${pos}=${t.value}${t.suit}`);
+      return { ...s, players };
+    }
+    if (name === '古明地觉') {
+      if (targetWind === undefined) { this.log('需要指定目标'); return null; }
+      p.satoriCopyTarget = targetWind;
+      p.satoriCopyUsed = false;
+      this.log(`👁️ 読心：下局将获得${s.players[targetWind].name}的技能`);
+      return { ...s, players };
+    }
+    if (name === '丰聪耳神子') {
+      const info = s.players.map(p => `${p.name}:${p.hand.length}张${checkTenpai(p.hand, p.melds) ? '听' : ''}`).join(' ');
+      this.log(`👂 聴聞：${info}`);
+      return { ...s, players };
+    }
+    if (name === '菅牧典') {
+      for (const op of s.players) {
+        if (op.wind !== s.currentPlayer) {
+          const d = op.discards.map(t => `${t.value}${t.suit}`).join(' ');
+          this.log(`📋 ${op.name}弃牌：[${d}]`);
+        }
+      }
+      return { ...s, players };
+    }
+
+    // === 弃牌隐藏 ===
+    if (name === '露米娅') {
+      // 暗黒：发动次数×30%概率隐藏弃牌 (最高90%)
+      players[s.currentPlayer].hideDiscards = Math.min(players[s.currentPlayer].abilityUseCount * 0.3, 0.9);
+      this.log(`🌑 ${name}：暗黒 — 弃牌${Math.round(players[s.currentPlayer].hideDiscards * 100)}%概率不可见`);
+      return { ...s, players };
+    }
+    // === 蟲群：索子牌50%概率变宝牌 ===
+    if (name === '莉格露·奈特巴格') {
+      this.log(`🪲 蟲群：本局和牌时索子50%概率变宝牌`);
+      return { ...s, players };  // 效果在 riichi-check 中处理
+    }
+    if (name === '河城荷取' || name === '驹草山如') {
+      players[s.currentPlayer].hideDiscards = 1;
+      this.log(`🪲 ${name}：本巡弃牌对对手不可见`);
+      return { ...s, players };
+    }
+    if (name === '古明地恋') {
+      this.log('💜 無意識：本局他人发动技能后能量归零');
+      return { ...s, players };
+    }
+
+    // === 对手摸牌不显示 ===
+    // === 夜雀：1索当任意牌（joker） ===
+    if (name === '米斯蒂娅·萝蕾拉') {
+      p.jokerSuit = 's';
+      this.log(`🎵 夜雀：手牌1索可当任意牌使用`);
+      return { ...s, players };
+    }
+    if (name === '清兰') {
+      if (targetWind === undefined) { this.log('需要指定目标'); return null; }
+      this.log(`🎵 ${name}：${s.players[targetWind].name} 摸牌不显示`);
+      return { ...s, players };
+    }
+    if (name === '哆来咪') {
+      for (let i = 0; i < 4; i++) {
+        if (i !== s.currentPlayer) {
+          this.log(`💤 夢世界：${s.players[i].name} 摸牌不显示`);
+        }
+      }
+      return { ...s, players };
+    }
+
+    // === 永遠：1饼当任意牌（joker） ===
+    if (name === '蓬莱山辉夜') {
+      p.jokerSuit = 'p';
+      this.log(`🌙 永遠：手牌1饼可当任意牌使用`);
+      return { ...s, players };
+    }
+    // === 歴史：首张弃牌进下次庄家配牌 ===
+    if (name === '上白泽慧音') {
+      p.abilityUsedThisHand = 1; // 标记已发动，具体逻辑在 discardTile 中
+      this.log(`📜 歴史：本局首张弃牌将出现在下次庄家配牌`);
+      return { ...s, players };
+    }
+    // === 幸運：摸到宝牌同花色+10能量 ===
+    if (name === '因幡帝') {
+      this.log(`🍀 幸運：摸到与宝牌同花色牌时+10能量，局终统计`);
+      return { ...s, players };  // 效果在 drawTile / HAND_OVER 中
+    }
+    // === 薬学：其他玩家能力消耗翻倍 ===
+    if (name === '八意永琳') {
+      this.log(`💊 薬学：本局其他玩家发动能力需消耗200能量`);
+      return { ...s, players };  // 拦截逻辑在 activateAbility 中
+    }
+    // === 不死：被和时对方偿还4000分 ===
+    if (name === '藤原妹红') {
+      this.log(`🔥 不死：本局因自摸/点炮失去分数时对方需偿还4000分`);
+      return { ...s, players };  // 效果在 finishWin 中
+    }
+    // === 審判：所有玩家手牌可见 ===
+    if (name === '四季映姬') {
+      this.log(`⚖️ 審判：本局所有玩家手牌对你可见`);
+      return { ...s, players, seeAllHands: true };
+    }
+
+    // ── th10 风神录 ──
+    // === 紅葉：手牌里的发都是宝牌 ===
+    if (name === '秋静叶') {
+      this.log(`🍁 紅葉：本局手牌里的发都是宝牌`);
+      return { ...s, players };
+    }
+    // === 豊穣：一张发可变任意字牌 ===
+    if (name === '秋穰子') {
+      p.jokerSuit = 'z';
+      this.log(`🌾 豊穣：一张发可当任意字牌使用`);
+      return { ...s, players };
+    }
+    // === 厄流し：上家弃牌最后一张与手牌交换 ===
+    if (name === '键山雏') {
+      const prev = ((s.currentPlayer + 3) % 4) as Wind; // 上家
+      const prevDiscards = players[prev].discards;
+      if (prevDiscards.length === 0) {
+        this.log('🔄 上家弃牌区为空');
+        return { ...s, players };
+      }
+      const discardTile = prevDiscards[prevDiscards.length - 1];
+      players[prev].discards = prevDiscards.slice(0, -1);
+      players[s.currentPlayer].hand.push(discardTile);
+      // 弃一张手牌到上家弃牌区
+      const myIdx = 0; // 简化：取第一张
+      const myTile = p.hand[myIdx];
+      players[s.currentPlayer].hand = [...p.hand.slice(0, myIdx), ...p.hand.slice(myIdx + 1)];
+      players[prev].discards.push(myTile);
+      this.log(`🔄 厄流し：${myTile.value}${myTile.suit}↔${discardTile.value}${discardTile.suit}`);
+      return { ...s, players };
+    }
+    // === 光学迷彩：宝牌每张计2翻 ===
+    if (name === '河城荷取') {
+      this.log(`🔬 光学迷彩：本局宝牌每张计2翻`);
+      return { ...s, players };
+    }
+    // === 千里眼：牌山可见 ===
+    if (name === '犬走椛') {
+      this.log(`👁️ 千里眼：可通过牌山按钮查看剩余牌`);
+      return { ...s, players };
+    }
+    // === 天流：索子摸牌概率增加 ===
+    if (name === '八坂神奈子') {
+      const level = Math.min(p.abilityUseCount + 1, 3);
+      this.log(`🌬️ 天流 Lv${level}：索子摸牌概率${30+level*10}%`);
+      return { ...s, players };
+    }
+    // === 大地：饼子摸牌概率增加 ===
+    if (name === '洩矢诹访子') {
+      const level = Math.min(p.abilityUseCount + 1, 3);
+      this.log(`⛰️ 大地 Lv${level}：饼子摸牌概率${30+level*10}%`);
+      return { ...s, players };
+    }
+
+    // === 死誘：随机一张手牌变宝牌 ===
+    if (name === '西行寺幽幽子') {
+      if (p.hand.length === 0) {
+        this.log('🦋 手牌为空，死誘无效');
+        return { ...s, players };
+      }
+      const ri = Math.floor(Math.random() * p.hand.length);
+      const target = p.hand[ri];
+      if (!p.deathDoraIds.includes(target.id)) {
+        p.deathDoraIds = [...p.deathDoraIds, target.id];
+        this.log(`🦋 死誘：${target.value}${target.suit} 变为宝牌`);
+      } else {
+        this.log(`🦋 死誘：${target.value}${target.suit} 已是宝牌`);
+      }
+      return { ...s, players };
+    }
+    if (name === '村纱水蜜') {
+      if (targetWind === undefined) { this.log('需要指定目标'); return null; }
+      this.log(`🚢 ${name}：${s.players[targetWind].name} 本巡不能荣和`);
+      return { ...s, players };
+    }
+
+    // === 不能立直 ===
+    if (name === '苏我屠自古') {
+      for (let i = 0; i < 4; i++) {
+        if (i !== s.currentPlayer) {
+          this.log(`⚡ 雷鳴：${s.players[i].name} 本巡不能立直`);
+        }
+      }
+      return { ...s, players };
+    }
+
+    // === 随机对手弃牌 ===
+    if (name === '多多良小伞' || name === '克劳恩皮丝') {
+      const others = [0,1,2,3].filter(i => i !== s.currentPlayer);
+      const victim = others[Math.floor(Math.random() * others.length)];
+      const vh = s.players[victim].hand;
+      if (vh.length > 0) {
+        const ri = Math.floor(Math.random() * vh.length);
+        const tile = vh[ri];
+        players[victim].hand = vh.filter((_, i) => i !== ri);
+        players[victim].discards = [...s.players[victim].discards, tile];
+        this.log(`😱 ${name}：${s.players[victim].name} 被迫弃${tile.value}${tile.suit}`);
+      }
+      return { ...s, players };
+    }
+
+    // === 点炮/被荣和减半 ===
+    if (name === '洩矢诹访子' || name === '宫古芳香' || name === '庭渡久侘歌' || name === '杖刀偶磨弓' || name === '姬虫百百世') {
+      this.log(`🛡️ ${name}：本局被荣和支付减半`);
+      return { ...s, players };
+    }
+
+    // === 和牌加分 ===
+    if (name === '戎璎花') { this.log('🐟 惠比寿：自摸和牌+500点'); return { ...s, players }; }
+    if (name === '少名针妙丸') { this.log('🔨 万宝槌：本巡和牌+30%'); return { ...s, players }; }
+    if (name === '纯狐') { this.log('✨ 純粋：本巡和牌+50%'); return { ...s, players }; }
+    if (name === '八坂神奈子') { this.log('🌩️ 天流：本局和牌+30%'); return { ...s, players }; }
+    if (name === '日白残无') { this.log('😈 欲望：每和一次+20%'); return { ...s, players }; }
+    if (name === '鬼人正邪') { this.log('🔄 逆転：被荣和时对手多付1000'); return { ...s, players }; }
+    if (name === '三头慧之子') { this.log('⚔️ 開戦：和牌对手多付1000'); return { ...s, players }; }
+    if (name === '寅丸星') { this.log('💎 宝塔：宝牌每张+500'); return { ...s, players }; }
+    if (name === '今泉影狼') { this.log('🌙 月夜：幺九牌每张+500'); return { ...s, players }; }
+    if (name === '埴安神袿姬') { this.log('🗿 造形：面子数×500加分'); return { ...s, players }; }
+    if (name === '磐永阿梨夜') { this.log('⏸️ 不変：和牌固定8000点'); return { ...s, players }; }
+
+    // === 水桥帕露希：嫉妬 — 指定对手本局无法增加能量 ===
+    if (name === '水桥帕露希') {
+      if (targetWind === undefined) { this.log('需要指定目标'); return null; }
+      players[targetWind].energyGainBlocked = true;
+      this.log(`💚 嫉妬：${s.players[targetWind].name} 本局无法增加能量`);
+      return { ...s, players };
+    }
+
+    // === 星熊勇仪：怪力 — 下一局配牌有三色同顺 ===
+    if (name === '星熊勇仪') {
+      this.log('💪 怪力：下一局配牌将有3色同顺');
+      return { ...s, players, yuugiSanshoku: true };
+    }
+
+    // === 灵乌路空：核融合 — 每局限一次，一张手牌换成宝牌指示牌 ===
+    if (name === '灵乌路空') {
+      if (p.abilityUsedThisHand > 0) { this.log('☢️ 本局已使用过核融合'); return null; }
+      if (!extraTile || !extraTile.suit) { this.log('☢️ 需要选择一张手牌'); return null; }
+      const doraIndicator = s.doraIndicators[s.doraIndicators.length - 1];
+      if (!doraIndicator) { this.log('☢️ 没有宝牌指示牌'); return null; }
+      const hi = p.hand.findIndex(t => t.suit === extraTile.suit && t.value === extraTile.value);
+      if (hi < 0) { this.log('☢️ 手牌中无此牌'); return null; }
+      const newTile = { ...doraIndicator, id: doraIndicator.id + 10000 };
+      p.hand = [...p.hand.slice(0, hi), newTile, ...p.hand.slice(hi + 1)];
+      p.abilityUsedThisHand = 1;
+      this.log(`☢️ 核融合：${extraTile.value}${extraTile.suit}→${newTile.value}${newTile.suit}(宝牌指示牌)`);
+      return { ...s, players };
+    }
+    if (name === '封兽鵺') { this.log('👻 正体不明：对手看到手牌数±1'); return { ...s, players }; }
+    if (name === '幽谷响子') { this.log('📢 やまびこ：弃牌后可再弃同花色'); return { ...s, players }; }
+    if (name === '物部布都') { this.log('🌬️ 風水：下张摸牌必定是万子'); return { ...s, players }; }
+    if (name === '二岩狢子') { this.log('🦝 化け：弃牌伪装幺九牌'); return { ...s, players }; }
+    if (name === '赤蛮奇') { this.log('💀 首飛び：弃牌飞回牌山顶'); return { ...s, players }; }
+    if (name === '九十九八桥') { this.log('🎵 琴の音色：摸牌后弃同花色再摸'); return { ...s, players }; }
+    if (name === '稀神探女') { this.log('🔄 逆言：宣言牌下巡必摸到'); return { ...s, players }; }
+    if (name === '赫卡提亚') { this.log('👥 三身：借用对手手牌一张'); return { ...s, players }; }
+    if (name === '爱塔妮缇拉尔瓦') { this.log('🦋 鱗粉：对手下巡牌面模糊'); return { ...s, players }; }
+    if (name === '坂田合欢') { this.log('🌿 山の恵み：幺九牌可当任意牌'); return { ...s, players }; }
+    if (name === '尔子田里乃・丁礼田舞') { this.log('⛩️ 神降ろし：下张摸牌变宝牌'); return { ...s, players }; }
+    if (name === '牛崎润美') { this.log('🐄 重量変化：对手弃字牌则跳过'); return { ...s, players }; }
+    if (name === '吉吊八千慧') { this.log('🐢 調伏：指定对手本局不能发动能力'); return { ...s, players }; }
+    if (name === '山城高岭') { this.log('🐉 竜脈：手牌5万视为红宝牌'); return { ...s, players }; }
+    if (name === '玉造魅须丸') { this.log('🔮 勾玉：同花色3张视为面子'); return { ...s, players }; }
+    if (name === '饭纲丸龙') { this.log('⭐ 星雲：牌山重新洗牌'); return { ...s, players }; }
+    if (name === '天弓千亦') { this.log('🏪 市場：手中的中视为万能牌'); return { ...s, players }; }
+    if (name === '天火人血枪') { this.log('🔥 火炎：对手宝牌本巡无效'); return { ...s, players }; }
+    if (name === '豫母都日狭美') { this.log('💀 黄泉：流局独赢罚符'); return { ...s, players }; }
+    if (name === '尘塚姥芽') { this.log('💨 埃舞：对手摸牌不能组顺子'); return { ...s, players }; }
+    if (name === '封兽魑魅') { this.log('👁️ 幻惑：对手手牌2张显示假牌'); return { ...s, players }; }
+    if (name === '道神驯子') { this.log('❓ 道謎：对手答错跳过摸牌'); return { ...s, players }; }
+    if (name === '维缦·浅间') { this.log('🔀 情報再構築：弃牌全洗入牌山'); return { ...s, players }; }
+    if (name === '绵月丰姬') { this.log('🌊 海山の絆：自风场风全视为役牌'); return { ...s, players }; }
+    if (name === '渡里贝子') { this.log('🏙️ 虚構都市：对手牌局信息虚构化'); return { ...s, players }; }
+
+    // ── qita 其他角色 ──
+    if (name === '稗田阿求') {
+      // 記憶：局终手牌字牌+20能量（HAND_OVER时结算）
+      this.log('📜 記憶：本局结束时手牌字牌+20能量');
+      return { ...s, players };
+    }
+    if (name === '本居小铃') {
+      // 読書：摸到/打出字牌后+20能量
+      p.readingMode = true;
+      this.log('📖 読書：摸到或打出字牌后+20能量');
+      return { ...s, players };
+    }
+    if (name === '绵月依姬') {
+      // 神降ろし：每局限一次，和牌时+1翻（finishWin中结算）
+      if (p.abilityUsedThisHand > 0) { this.log('⛩️ 本局已发动过神降ろし'); return null; }
+      this.log('⛩️ 神降ろし：本局和牌时所有役+1翻');
+      return { ...s, players };
+    }
+    if (name === '宇佐见莲子') {
+      // 境界視：摸牌大概率中张（drawTile中结算）
+      p.drawBiasMiddle = true;
+      this.log('👁️ 境界視：本局摸牌大概率摸中张');
+      return { ...s, players };
+    }
+    if (name === '玛艾露贝莉·赫恩') {
+      // 夢幻：摸牌大概率幺九（drawTile中结算）
+      p.drawBiasTerminal = true;
+      this.log('🌙 夢幻：本局摸牌大概率摸幺九牌');
+      return { ...s, players };
+    }
+    if (name === '姬海棠羽立') {
+      // 念写：局终对手手牌有字牌付4000（HAND_OVER时结算）
+      this.log('📸 念写：局终时对手手牌有字牌需付4000分');
+      return { ...s, players };
+    }
+    if (name === '桑尼·米尔克') {
+      // 光の屈折：下局开始对手付饼子税（createNextHand中结算）
+      this.log('☀️ 光の屈折：下局其他玩家支付饼子税(1000×饼子数)');
+      return { ...s, players, sunnyTaxPending: true };
+    }
+    if (name === '露娜·切尔德') {
+      // 沈黙：流局时每人付4000（executeDraw中结算）
+      this.log('🔇 沈黙：本局流局时其他玩家每人付4000分');
+      return { ...s, players };
+    }
+
+    // 未匹配
+    return null;
   }
 }

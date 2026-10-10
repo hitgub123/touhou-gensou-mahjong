@@ -19,9 +19,9 @@ interface Team {
 }
 
 interface CharacterSelectProps {
-  onStart: (selected: Character[]) => void;
+  onStart: (selected: Character[], useAbilities: boolean) => void;
   onBack: () => void;
-  teamMode?: boolean;
+  teamMode: boolean;
 }
 
 // Auto-discover background images (same source as StartPage)
@@ -43,6 +43,7 @@ const CharacterSelect: React.FC<CharacterSelectProps> = ({ onStart, onBack, team
   const [hoveredChar, setHoveredChar] = React.useState<Character | null>(null);
   const [tooltipPos, setTooltipPos] = React.useState({ x: 0, y: 0 });
   const [confirming, setConfirming] = React.useState(false);
+  const [useAbilities, setUseAbilities] = React.useState(true);
   const bgImage = React.useMemo(
     () => BG_IMAGES.length > 0
       ? BG_IMAGES[Math.floor(Math.random() * BG_IMAGES.length)]
@@ -60,16 +61,14 @@ const CharacterSelect: React.FC<CharacterSelectProps> = ({ onStart, onBack, team
 
   const handleSelect = (char: Character) => {
     setSelected(prev => {
-      // If already selected, deselect
       const existingIdx = prev.findIndex(c => c?.id === char.id);
       if (existingIdx >= 0) {
         const next = [...prev];
         next[existingIdx] = null;
         return next;
       }
-      // Find first empty slot
       const emptyIdx = prev.findIndex(c => c === null);
-      if (emptyIdx < 0) return prev; // all full
+      if (emptyIdx < 0) return prev;
       const next = [...prev];
       next[emptyIdx] = char;
       return next;
@@ -90,12 +89,10 @@ const CharacterSelect: React.FC<CharacterSelectProps> = ({ onStart, onBack, team
       setSelectedTeams(prev => {
         const exists = prev.find(t => t.teamId === team.teamId);
         if (exists) {
-          // Deselect team → also remove its members
           setSelectedTeamMembers(m => { const next = new Map(m); next.delete(team.teamId); return next; });
           return prev.filter(t => t.teamId !== team.teamId);
         }
         if (prev.length >= 4) return prev;
-        // Select team → init empty members
         setSelectedTeamMembers(m => { const next = new Map(m); next.set(team.teamId, []); return next; });
         return [...prev, team];
       });
@@ -113,21 +110,17 @@ const CharacterSelect: React.FC<CharacterSelectProps> = ({ onStart, onBack, team
       const current = next.get(activeTeam.teamId) || [];
       const idx = current.findIndex(c => c.id === char.id);
       if (idx >= 0) {
-        // Deselect
         next.set(activeTeam.teamId, current.filter(c => c.id !== char.id));
       } else if (current.length < 5) {
-        // Select (max 5)
         next.set(activeTeam.teamId, [...current, char]);
       }
       return next;
     });
   };
 
-  // In team mode: all filled = 4 teams selected AND each has 5 members
   const teamMembersReady = teamMode && selectedTeams.length === 4 &&
     selectedTeams.every(t => (selectedTeamMembers.get(t.teamId) || []).length === 5);
 
-  // Flatten team members for confirm display
   const allTeamMembersFlat = React.useMemo(() => {
     if (!teamMode) return [];
     const result: Character[] = [];
@@ -147,7 +140,6 @@ const CharacterSelect: React.FC<CharacterSelectProps> = ({ onStart, onBack, team
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
     const TOOLTIP_W = 320;
     let left = rect.left;
-    // 防右侧溢出：如果悬浮窗超出右边界，则右侧对齐
     if (left + TOOLTIP_W > window.innerWidth - 8) {
       left = Math.max(8, window.innerWidth - TOOLTIP_W - 8);
     }
@@ -160,22 +152,37 @@ const CharacterSelect: React.FC<CharacterSelectProps> = ({ onStart, onBack, team
 
   const quickStart = React.useCallback(() => {
     if (teamMode) {
-      const shuffledTeams = [...teams].sort(() => Math.random() - 0.5).slice(0, 4);
+      // 保留已选队伍，只填充空位
+      const currentTeams = selectedTeams;
+      const currentTeamIds = new Set(currentTeams.map(t => t.teamId));
+      const available = teams.filter(t => !currentTeamIds.has(t.teamId));
+      const needed = 4 - currentTeams.length;
+      const shuffled = [...available].sort(() => Math.random() - 0.5).slice(0, needed);
+      const newTeams = [...currentTeams, ...shuffled];
+
       const membersMap = new Map<string, Character[]>();
-      for (const team of shuffledTeams) {
-        const shuffled = [...team.members].sort(() => Math.random() - 0.5).slice(0, 5);
-        membersMap.set(team.teamId, shuffled);
+      for (const team of newTeams) {
+        const shuffledMembers = [...team.members].sort(() => Math.random() - 0.5).slice(0, 5);
+        membersMap.set(team.teamId, shuffledMembers);
       }
-      setSelectedTeams(shuffledTeams);
+      setSelectedTeams(newTeams);
       setSelectedTeamMembers(membersMap);
       setConfirming(true);
     } else {
-      const allChars = teams.flatMap(t => t.members);
+      // 保留已选角色，只填充空位
+      const currentIds = new Set(selected.filter(c => c !== null).map(c => c!.id));
+      const allChars = teams.flatMap(t => t.members).filter(c => !currentIds.has(c.id));
       const shuffled = [...allChars].sort(() => Math.random() - 0.5);
-      setSelected(shuffled.slice(0, 4));
+      let si = 0;
+      const next = selected.map(c => {
+        if (c !== null) return c;
+        if (si < shuffled.length) return shuffled[si++];
+        return null;
+      });
+      setSelected(next);
       setConfirming(true);
     }
-  }, [teams, teamMode]);
+  }, [teams, teamMode, selected, selectedTeams]);
 
   const handleStartClick = () => {
     if (teamMode && selectedTeams.length < 4) return;
@@ -194,17 +201,15 @@ const CharacterSelect: React.FC<CharacterSelectProps> = ({ onStart, onBack, team
         teamInfo.push({ teamId: team.teamId, teamName: team.teamName, roundOrder: [...members] });
       }
       (allChars as any).__teamInfo = teamInfo;
-      onStart(allChars);
+      onStart(allChars, useAbilities);
     } else {
-      onStart(selected as Character[]);
+      onStart(selected as Character[], useAbilities);
     }
   };
 
   const handleCancelConfirm = () => {
     setConfirming(false);
   };
-
-  const SLOT_LABELS = ['1P', '2P', '3P', '4P'];
 
   return (
     <div className="char-select-page">
@@ -298,7 +303,8 @@ const CharacterSelect: React.FC<CharacterSelectProps> = ({ onStart, onBack, team
                       onMouseLeave={handleMouseLeave}
                     >
                       <div className="char-avatar">
-                        {char.nameCN.slice(0, 1)}
+                        <img src={`/chars/${char.id}.svg`} alt={char.nameCN} width={60} height={60}
+                          onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }} />
                       </div>
                       <div className="char-name">{char.nameCN}</div>
                       <div className="char-name-en">{char.nameEN}</div>
@@ -357,7 +363,10 @@ const CharacterSelect: React.FC<CharacterSelectProps> = ({ onStart, onBack, team
             {!teamMode && (
               <div className="confirm-list">
                 {(selected.filter(Boolean) as Character[]).map((char, i) => (
-                  <div key={char.id} className="confirm-item">
+                  <div key={char.id} className="confirm-item"
+                    onMouseEnter={(e) => { setHoveredChar(char); setTooltipPos({ x: e.clientX + 16, y: e.clientY + 8 }); }}
+                    onMouseLeave={() => setHoveredChar(null)}
+                  >
                     <span className="confirm-slot">{SLOT_LABELS[i]}</span>
                     <div className="confirm-char-info">
                       <span className="confirm-cn">{char.nameCN}</span>
@@ -381,7 +390,10 @@ const CharacterSelect: React.FC<CharacterSelectProps> = ({ onStart, onBack, team
                       </div>
                       <div className="confirm-team-members">
                         {members.map((m, j) => (
-                          <span key={m.id} className="confirm-member-tag">
+                          <span key={m.id} className="confirm-member-tag"
+                            onMouseEnter={(e) => { setHoveredChar(m); setTooltipPos({ x: e.clientX + 16, y: e.clientY + 8 }); }}
+                            onMouseLeave={() => setHoveredChar(null)}
+                          >
                             {m.nameCN}
                             <span className="confirm-member-num">R{j + 1}</span>
                           </span>
@@ -395,6 +407,12 @@ const CharacterSelect: React.FC<CharacterSelectProps> = ({ onStart, onBack, team
 
             <div className="confirm-actions">
               <button className="btn-back" onClick={handleCancelConfirm}>← 返回</button>
+              <button className={`toggle-btn-sm ${useAbilities ? 'toggle-on' : ''}`}
+                onClick={() => setUseAbilities(v => !v)}
+                style={{ fontSize: 14, padding: '6px 16px' }}
+                title="启用角色超能力（能量槽+技能）">
+                {useAbilities ? '⚡ 能力 ON' : '能力 OFF'}
+              </button>
               <button className="btn-start-game" onClick={handleConfirm}>确认开始</button>
             </div>
           </div>

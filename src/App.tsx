@@ -39,15 +39,17 @@ const THEMES = [
 
 const GamePage: React.FC<GamePageProps> = ({ characters, onExit }) => {
   const charNames = characters.map(c => ({ name: c.nameCN }));
-  const [gameLength, setGameLength] = React.useState(2);
+  const [gameLength, setGameLength] = React.useState(4);
   const [noCall, setNoCall] = React.useState(true);
-  const [autoWin, setAutoWin] = React.useState(true);
+  const [autoWin, setAutoWin] = React.useState(false);
   const {
     state, humanDiscard, humanAction, newGame, nextHand,
     selectedTileId, setSelectedTileId, messages, isAiThinking,
     swapMode, enterSwapMode, executeSwap, cancelSwap,
     riichiMode, riichiValidTileIds, cancelRiichi,
     difficulty, setDifficulty,
+    autoPlay, setAutoPlay,
+    activateAbility,
     downloadLog,
   } = useGame(charNames, gameLength);
 
@@ -62,33 +64,37 @@ const GamePage: React.FC<GamePageProps> = ({ characters, onExit }) => {
     setSkinIdx(Number(e.target.value));
   }, []);
 
-  // ── 自摸切：自动弃刚摸的牌（除非有动作提示） ──
+  // ── 自摸切：自动弃刚摸的牌（除非有动作提示）──
+  // 托管模式下由 GameController.tick() 通过 AI 选牌，此 effect 不触发
   React.useEffect(() => {
     if (!autoSelfDiscard) return;
+    if (autoPlay) return; // 托管时 AI 选牌，不盲打摸牌
     const cp = state.players[state.currentPlayer];
     if (!cp?.isHuman) return;
     if (state.phase !== GamePhase.DISCARDING) return;
     if (!state.drawnTile) return;
+    // 有可执行动作时不自动弃牌（防止覆盖立直/自摸/暗杠等选择）
+    const acts = state.actionsAvailable[state.currentPlayer];
+    if (acts && (acts.canTsumo || acts.canRiichi || acts.canAnkan || acts.canKakan)) return;
     humanDiscard(state.drawnTile.id);
-  }, [state.phase, state.currentPlayer, state.drawnTile?.id, autoSelfDiscard, humanDiscard]);
+  }, [state.phase, state.currentPlayer, state.drawnTile?.id, autoSelfDiscard, autoPlay, humanDiscard]);
 
-  // ── 立直后默认开启自摸切，可手动取消勾选 ──
+  // ── 立直后默认开启自摸切（托管模式除外）──
   const humanWind = React.useMemo(() => WINDS.find(w => state.players[w].isHuman), [state.players]);
   const prevRiichiRef = React.useRef(false);
   React.useEffect(() => {
     if (humanWind === undefined) return;
     const isRiichi = state.players[humanWind].isRiichi;
-    if (isRiichi && !prevRiichiRef.current) {
+    if (isRiichi && !prevRiichiRef.current && !autoPlay) {
       setAutoSelfDiscard(true);
     }
     prevRiichiRef.current = isRiichi;
-  }, [state.players[humanWind ?? 0]?.isRiichi]);
+  }, [state.players[humanWind ?? 0]?.isRiichi, autoPlay]);
 
   const handleNewGame = React.useCallback(() => {
     setGameKey(k => k + 1);
     setAutoSelfDiscard(false);
     setNoCall(true);
-    setAutoWin(true);
     newGame();
   }, [newGame]);
 
@@ -96,7 +102,6 @@ const GamePage: React.FC<GamePageProps> = ({ characters, onExit }) => {
     setGameKey(k => k + 1);
     setAutoSelfDiscard(false);
     setNoCall(true);
-    setAutoWin(true);
     nextHand();
   }, [nextHand]);
 
@@ -118,6 +123,7 @@ const GamePage: React.FC<GamePageProps> = ({ characters, onExit }) => {
   // ── 自动和：荣和或自摸时立即和牌 ──
   React.useEffect(() => {
     if (!autoWin) return;
+    if (state.phase === GamePhase.HAND_OVER || state.phase === GamePhase.GAME_OVER) return;
     const hWind = WINDS.find(w => state.players[w].isHuman);
     if (hWind === undefined) return;
     const actions = state.actionsAvailable[hWind];
@@ -210,6 +216,8 @@ const GamePage: React.FC<GamePageProps> = ({ characters, onExit }) => {
         onToggleNoCall={() => setNoCall(v => !v)}
         onToggleAutoWin={() => setAutoWin(v => !v)}
         gameLength={gameLength} onGameLengthChange={setGameLength}
+        autoPlay={autoPlay} onToggleAutoPlay={() => setAutoPlay(!autoPlay)}
+        activateAbility={activateAbility}
       />
       <div className="status-bar">
         <div className="status-messages">
@@ -248,6 +256,7 @@ const GamePage: React.FC<GamePageProps> = ({ characters, onExit }) => {
 const App: React.FC = () => {
   const [page, setPage] = React.useState<Page>('title');
   const [selectedChars, setSelectedChars] = React.useState<Character[] | null>(null);
+  const [useAbilities, setUseAbilities] = React.useState(false);
   const [teamMode, setTeamMode] = React.useState(false);
 
   // 禁用鼠标右键菜单
@@ -260,8 +269,9 @@ const App: React.FC = () => {
   const handleStartSolo = () => { setTeamMode(false); setPage('select'); };
   const handleStartTeam = () => { setTeamMode(true); setPage('select'); };
   const handleBack = () => setPage('title');
-  const handleSelectDone = (chars: Character[]) => {
+  const handleSelectDone = (chars: Character[], useAbilities: boolean) => {
     setSelectedChars(chars);
+    setUseAbilities(useAbilities);
     setPage('game');
   };
   const handleExitGame = () => {

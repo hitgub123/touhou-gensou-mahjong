@@ -2,10 +2,13 @@
  * ai.ts — AI 决策主入口
  *
  * 整合防守、进攻、策略三大模块，接收 DifficultyConfig 控制难度。
+ * P0: 弃牌以向听数为首要标准，次优才看评分。
  */
 
 import type { Tile, GameState, Wind } from './types';
-import { tileKey, isTerminalHonor, isMiddleTile, isDragonTile } from './tiles';
+import { tileKey, isTerminalHonor, isMiddleTile, isDragonTile, isYakuhaiTile } from './tiles';
+import { tilesToHai } from './hand';
+import { checkMahjongStatus } from '../../utils/syanten.js';
 
 import type { DifficultyConfig } from './difficulty';
 import { DIFFICULTY_NORMAL } from './difficulty';
@@ -43,42 +46,74 @@ export function aiChooseDiscard(
   // 计算危险度（防守）
   const dangerMap = calculateDanger(hand, state, playerWind, config);
 
-  // 计算每张牌的进攻得分
+  // 推/缩判断
+  const pushFold = shouldPushOrFold(hand, state, playerWind, config);
+
+  // 对每张牌算三个值：打出后的向听数 + 进攻评分 + 待牌剩余枚数
   const scored = hand.map(t => {
-    const key = tileKey(t);
-    const offense = scoreDiscardTile(t, hand, state, playerWind, config);
-    const danger = dangerMap.get(key) ?? 0;
-    const defenseWeight = config.defenseWeight;
+    const remaining = hand.filter(h => h.id !== t.id);
+    const shanten = getShanten(remaining);
+    let offense = scoreDiscardTile(t, hand, state, playerWind, config);
+    const danger = dangerMap.get(tileKey(t)) ?? 0;
 
-    // 推/缩判断
-    const pushFold = shouldPushOrFold(hand, state, playerWind, config);
-    let finalScore: number;
-
-    if (pushFold === 'fold') {
-      // 弃和：几乎只看安全度
-      finalScore = offense - danger * 100;
-    } else if (pushFold === 'ambiguous') {
-      // 模糊：进攻和防守权重相近
-      finalScore = offense - danger * 30 * defenseWeight;
-    } else {
-      // 进攻：安全度权重低
-      finalScore = offense - danger * 3 * defenseWeight;
+    // 听牌时：计算待牌总剩余枚数，剩余越多越该保留此弃牌路径
+    if (shanten === 0) {
+      const hai = tilesToHai(remaining);
+      const tenpaiResult = checkMahjongStatus(hai);
+      if (typeof tenpaiResult === 'object' && tenpaiResult.info) {
+        const uniqueWaits = new Set<string>();
+        for (const sol of tenpaiResult.info) {
+          for (const w of sol.waits) uniqueWaits.add(w);
+        }
+        // 统计每张待牌的可见枚数
+        let totalRemain = 0;
+        for (const w of uniqueWaits) {
+          const suit = w.slice(-1) as import('./types').TileSuit;
+          const val = parseInt(w.slice(0, -1));
+          let visible = 0;
+          for (const p of state.players) {
+            for (const d of p.discards) if (d.suit === suit && d.value === val) visible++;
+            for (const m of p.melds) for (const mt of m.tiles) if (mt.suit === suit && mt.value === val) visible++;
+          }
+          for (const di of state.doraIndicators) if (di.suit === suit && di.value === val) visible++;
+          // 自己手牌中的该牌也算可见
+          const inHand = hand.filter(h => h.suit === suit && h.value === val).length;
+          visible += inHand;
+          totalRemain += Math.max(0, 4 - visible);
+        }
+        // 剩余枚数越多越优先（×3 让枚数差影响大于牌自身分差）
+        offense += totalRemain * 5;
+      }
     }
 
-    return { tile: t, score: finalScore, danger };
+    return { tile: t, shanten, offense, danger };
   });
 
-  // 按综合得分排序（越高越好）
-  scored.sort((a, b) => b.score - a.score);
+  // P0: 以向听数为首要排序（越低越好），同向听数内按评分升序（低分先弃）
+  scored.sort((a, b) => {
+    if (a.shanten !== b.shanten) return a.shanten - b.shanten;
+    // 防守调整
+    let aScore = a.offense;
+    let bScore = b.offense;
+    if (pushFold === 'fold') {
+      aScore -= a.danger * 100;
+      bScore -= b.danger * 100;
+    } else if (pushFold === 'ambiguous') {
+      aScore -= a.danger * 30;
+      bScore -= b.danger * 30;
+    } else {
+      aScore -= a.danger * 3;
+      bScore -= b.danger * 3;
+    }
+    return aScore - bScore;  // 升序：低分在前 → 优先弃掉价值最低的牌
+  });
 
   // 次优选择（模拟失误）
   if (config.suboptimalDiscardChance > 0 && Math.random() < config.suboptimalDiscardChance) {
-    // 在 top 3 中随机选
     const topN = Math.min(3, scored.length);
     return scored[Math.floor(Math.random() * topN)].tile;
   }
 
-  // 选最高分的
   return scored[0].tile;
 }
 
@@ -159,49 +194,58 @@ function scoreDiscardTile(
 ): number {
   let score = 0;
 
-  // 基础得分：保留有价值的牌
+  // ── 字牌：役牌価値 + 対子/刻子状態 ──
   if (tile.suit === 'z') {
-    if (isDragonTile(tile)) score += 3;
-    else score += 2;
+    const count = hand.filter(t => t.suit === tile.suit && t.value === tile.value).length;
+    // 计算可见枚数（全场弃牌+鸣牌+宝牌指示）
+    let visible = 0;
+    for (const p of state.players) {
+      for (const d of p.discards) if (d.suit === tile.suit && d.value === tile.value) visible++;
+      for (const m of p.melds) for (const mt of m.tiles) if (mt.suit === tile.suit && mt.value === tile.value) visible++;
+    }
+    for (const di of state.doraIndicators) if (di.suit === tile.suit && di.value === tile.value) visible++;
+    // 包含自己手牌中的这一张
+    const totalVisible = visible + count;
+    const isDead = totalVisible >= 3; // 已有3+张可见，不可能成刻子/对子
+    const isYakuhai = isYakuhaiTile(tile, state.roundWind, _playerWind);
+    if (isDead) {
+      score += isYakuhai ? 1 : 0; // 死牌几乎无价值
+    } else if (count >= 3) score += isYakuhai ? 20 : 12;
+    else if (count === 2) score += isYakuhai ? 14 : 8;
+    else score += isYakuhai ? 6 : 2;
     return score;
   }
 
-  if (isTerminalHonor(tile)) score += 2;
-  if (isMiddleTile(tile)) score += 5;
-
-  // 孤立牌惩罚
-  const neighborCount = getNeighborCount(hand, tile);
-  if (neighborCount === 0) score -= 3;
-
-  // 对子/刻子价值
-  const pairCount = hand.filter(t => t.suit === tile.suit && t.value === tile.value).length;
-  if (pairCount >= 3) score += 8;
-  else if (pairCount === 2) score += 5;
-
-  // 顺子可能性
-  const seqPotential = getSequencePotential(hand, tile);
-  score += seqPotential * 2;
-
-  // 同花色张数
-  const suitCount = hand.filter(t => t.suit === tile.suit).length;
-  if (suitCount >= 5) score += 3;
-  if (suitCount <= 2 && suitCount > 0) score -= 2;
-
-  // Hard/Lunatic: 宝牌加成（有宝牌在手 → 尽量保留）
-  if (config.useHandValue) {
-    const doraBonus = getDoraValue(tile, state);
-    score += doraBonus * 2;
+  // ── 5ブロック理論に基づくブロック品質 ──
+  const sameCount = hand.filter(t => t.suit === tile.suit && t.value === tile.value).length;
+  if (sameCount >= 3) score += 20;
+  else if (sameCount === 2) score += 14;
+  else {
+    const adj = hand.filter(t => t.suit === tile.suit && Math.abs(t.value - tile.value) === 1).length;
+    const gap = hand.filter(t => t.suit === tile.suit && Math.abs(t.value - tile.value) === 2).length;
+    if (adj >= 2) score += 12;
+    else if (adj === 1) score += 8;
+    else if (gap >= 1) score += 5;
+    else score += 1; // 孤立牌
   }
 
-  // Hard/Lunatic: 向听数优化
+  // 赤ドラ：高価値
+  if (tile.isAkadora) score += 10;
+
+  // Hard/Lunatic: 宝牌加成
+  if (config.useHandValue) {
+    const doraBonus = getDoraValue(tile, state);
+    score += doraBonus * 3;
+  }
+
+  // Hard/Lunatic: 向听数悪化防止
   if (config.useWaitQuality) {
-    // 检查弃掉此牌后是否还能保持手牌形状
     const testHand = hand.filter(t => t.id !== tile.id);
     if (testHand.length === hand.length - 1) {
       const shantenBefore = getShanten(hand);
       const shantenAfter = getShanten(testHand);
       if (shantenAfter > shantenBefore) {
-        score -= 10; // 弃掉这张牌会增加向听数 → 坏棋
+        score -= 15;
       }
     }
   }

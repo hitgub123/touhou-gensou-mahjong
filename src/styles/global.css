@@ -369,7 +369,27 @@ body {
 }
 
 .btn-wall-pulldown:hover {
-  background: rgba(255,255,255,0.15);
+  background: rgba(255, 215, 0, 0.2);
+}
+.btn-reveal {
+  padding: 3px 8px;
+  font-size: 11px;
+  border: 1px solid rgba(201,168,76,0.3);
+  border-radius: 4px;
+  background: rgba(255,255,255,0.08);
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: all 0.2s;
+  line-height: 1;
+  white-space: nowrap;
+}
+.btn-reveal:hover {
+  background: rgba(255, 215, 0, 0.15);
+  border-color: rgba(255, 215, 0, 0.4);
+}
+.btn-reveal.active {
+  background: rgba(255, 215, 0, 0.15);
+  border-color: #ffd700;
 }
 
 .wall-pulldown-menu {
@@ -476,6 +496,8 @@ body {
   padding: 1px 4px;
   background: rgba(0,0,0,0.3);
   border-radius: 6px;
+  z-index: 1;
+  position: relative;
 }
 
 .opponent-horizontal .hand-tiles {
@@ -506,6 +528,8 @@ body {
   background: rgba(0,0,0,0.3);
   border-radius: 8px;
   height: 100%;
+  z-index: 1;
+  position: relative;
 }
 
 .opponent-vertical .hand-vertical {
@@ -515,13 +539,13 @@ body {
   align-items: center;
 }
 
-/* 对手手牌每张牌旋转：牌面向桌中央 */
+
 .opponent-west .hand-tiles .tile,
-.opponent-west .hand-tiles .tile:hover { transform: rotate(180deg); }
+.opponent-west .hand-tiles .tile:hover { transform: rotate(0deg);  }
 .opponent-south .hand-tiles .tile,
 .opponent-south .hand-tiles .tile:hover { transform: rotate(-90deg); }
 .opponent-north .hand-tiles .tile,
-.opponent-north .hand-tiles .tile:hover { transform: rotate(90deg); }
+.opponent-north .hand-tiles .tile:hover { transform: rotate(90deg);}
 
 /* 确保对手手牌的 SVG 填满牌面 */
 .opponent-area .tile .tile-svg {
@@ -546,6 +570,60 @@ body {
   border-left: 3px solid;
   border-radius: 2px;
   min-width: 0;
+}
+.player-avatar {
+  border-radius: 50%;
+  object-fit: cover;
+  flex-shrink: 0;
+}
+.player-name-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.player-name-col {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  line-height: 1.2;
+}
+.energy-bar-wrap {
+  display: flex;
+  align-items: center;
+  margin-top: 1px;
+}
+.energy-text {
+  font-size: 13px;
+  font-weight: 700;
+}
+.ability-count {
+  font-weight: 600;
+}
+.ability-btn {
+  transition: transform 0.1s;
+}
+.ability-btn:active {
+  transform: scale(0.9);
+}
+
+/* 能力发动闪光 */
+@keyframes ability-flash-anim {
+  0%   { box-shadow: 0 0 0px rgba(255,255,200,0); }
+  30%  { box-shadow: 0 0 30px rgba(255,255,100,0.9); }
+  100% { box-shadow: 0 0 0px rgba(255,255,200,0); }
+}
+.ability-flash {
+  animation: ability-flash-anim 0.8s ease-out;
+}
+
+/* 咲夜额外一巡闪光 */
+@keyframes sakuya-flash-anim {
+  0%   { box-shadow: 0 0 0px rgba(180,180,255,0); }
+  30%  { box-shadow: 0 0 40px rgba(150,150,255,0.9); }
+  100% { box-shadow: 0 0 0px rgba(180,180,255,0); }
+}
+.sakuya-flash {
+  animation: sakuya-flash-anim 1.2s ease-out;
 }
 .player-info-row {
   display: flex;
@@ -785,6 +863,20 @@ body {
   font-size: 10px;
   color: var(--text-secondary);
   margin-left: 2px;
+}
+
+.tenpai-tile-group {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0;
+}
+
+.tenpai-remain {
+  font-size: 10px;
+  color: #4fc3f7;
+  font-weight: 700;
+  line-height: 1;
 }
 
 .dora-label {
