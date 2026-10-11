@@ -368,9 +368,9 @@ export function getAllRequirements(
   const reqs: HandRequirement[] = [];
   for (let i = 0; i < playerNames.length; i++) {
     const req = getHandRequirement(playerNames[i], useCounts[i]);
-    // wind < 0: 特殊需求 (如 -2=对手限打), 不覆盖 wind, 记录发动者为 i
+    // wind === -2: 特殊需求(大妖精=对手限打), 不覆盖 wind, 记录发动者为 i
     if (req) { 
-      if (req.wind >= 0) req.wind = i;
+      if (req.wind !== -2) req.wind = i; // -2=大妖精特殊需求(限制他家弃牌)保持原样，其余对应到玩家编号
       req.playerIndex = i;  // 记录发起玩家
       reqs.push(req); 
     }

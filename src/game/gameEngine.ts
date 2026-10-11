@@ -118,9 +118,9 @@ export function createInitialState(characters?: { name: string }[], dealerWind?:
     const remaining = shuffleArray(wallPool);
 
     // 按优先级发预留牌（reserved 已按 useCount 降序）
-    // wind < 0: 大妖精等特殊需求，牌不进入手牌而是用作限制标记
+    // wind === -2: 大妖精特殊需求，牌不进入手牌而是用作限制标记
     for (const r of reserved) {
-      if (r.wind < 0) {
+      if (r.wind === -2) {
         // wind=-2: 对其他3位玩家的 restrictedDiscardKeys 各加牌
         const abilityUser = r.playerIndex ?? 0;
         for (let j = 0; j < 4; j++) {
@@ -1391,7 +1391,7 @@ export function createNextHand(prevState: GameState): GameState {
 
     const remaining2 = shuffleArray(wallPool);
     for (const r of reserved) {
-      if (r.wind < 0) {
+      if (r.wind === -2) {
         const abilityUser = r.playerIndex ?? 0;
         for (let j = 0; j < 4; j++) {
           if (j === abilityUser) continue;
