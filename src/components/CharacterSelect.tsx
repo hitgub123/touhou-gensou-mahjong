@@ -162,8 +162,16 @@ const CharacterSelect: React.FC<CharacterSelectProps> = ({ onStart, onBack, team
 
       const membersMap = new Map<string, Character[]>();
       for (const team of newTeams) {
-        const shuffledMembers = [...team.members].sort(() => Math.random() - 0.5).slice(0, 5);
-        membersMap.set(team.teamId, shuffledMembers);
+        // 保留用户已选队员，只随机补足空位
+        const existing = selectedTeamMembers.get(team.teamId) || [];
+        const existingIds = new Set(existing.map(c => c.id));
+        const pool = team.members.filter(c => !existingIds.has(c.id));
+        const shuffledPool = [...pool].sort(() => Math.random() - 0.5);
+        const filled = [...existing];
+        while (filled.length < 5 && shuffledPool.length > 0) {
+          filled.push(shuffledPool.pop()!);
+        }
+        membersMap.set(team.teamId, filled);
       }
       setSelectedTeams(newTeams);
       setSelectedTeamMembers(membersMap);
@@ -182,7 +190,7 @@ const CharacterSelect: React.FC<CharacterSelectProps> = ({ onStart, onBack, team
       setSelected(next);
       setConfirming(true);
     }
-  }, [teams, teamMode, selected, selectedTeams]);
+  }, [teams, teamMode, selected, selectedTeams, selectedTeamMembers]);
 
   const handleStartClick = () => {
     if (teamMode && selectedTeams.length < 4) return;
