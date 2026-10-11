@@ -268,6 +268,23 @@ const CharacterSelect: React.FC<CharacterSelectProps> = ({ onStart, onBack, team
       </div>
 
       {/* Body */}
+      {/* Mobile team selector: sidebar is hidden ≤768px, this dropdown replaces it */}
+      <div className="team-select-mobile">
+        <select
+          value={activeTeamIdx}
+          onChange={e => {
+            const i = Number(e.target.value);
+            if (teams[i]) handleTeamClick(teams[i], i);
+          }}
+          aria-label="选择作品"
+        >
+          {teams.map((team, i) => (
+            <option key={team.teamId} value={i}>
+              {team.teamName}({team.members.length})
+            </option>
+          ))}
+        </select>
+      </div>
       <div className="char-select-body">
         {/* Team sidebar */}
         <div className="char-team-list">

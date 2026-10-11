@@ -150,6 +150,8 @@
   padding: 8px 0;
   scrollbar-width: thin;
 }
+/* Mobile replacement for the hidden team sidebar (≤768px) */
+.team-select-mobile { display: none; }
 .char-team-list .team-tab {
   padding: 10px 16px;
   color: rgba(255,255,255,0.5);
@@ -431,6 +433,16 @@
   .start-title h1 { font-size: 36px; letter-spacing: 4px; }
   .start-menu { width: 260px; }
   .char-team-list { display: none; }
+  .team-select-mobile { display: block; padding: 8px 12px 0; }
+  .team-select-mobile select {
+    width: 100%;
+    padding: 10px 12px;
+    font-size: 15px;
+    border-radius: 10px;
+    background: rgba(30, 22, 50, 0.92);
+    color: #ffe9b0;
+    border: 1px solid rgba(255, 215, 0, 0.35);
+  }
   .char-grid { grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); }
 }
 

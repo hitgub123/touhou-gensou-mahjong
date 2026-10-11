@@ -1841,4 +1841,12 @@ body {
   .game-table { padding: 4px; gap: 4px; }
   .discard-area { padding: 4px; }
   .side-player { width: 60px; }
+  /* Portrait phones: hand row is wider than viewport; allow horizontal scroll
+     instead of clipping tiles (flex-start keeps the first tile reachable) */
+  .player-hand {
+    justify-content: flex-start;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: thin;
+  }
 }
